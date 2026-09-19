@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Video Upscaler AI</string>
+    <string name="notif_channel">Video upscaling progress</string>
+    <string name="notif_title">Upscaling video…</string>
+    <string name="notif_done">Upscaling complete</string>
+    <string name="notif_failed">Upscaling failed</string>
+    <string name="notif_cancel">Cancel</string>
+</resources>

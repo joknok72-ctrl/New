@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">محسّن الفيديو AI</string>
+    <string name="notif_channel">تقدم تحسين الفيديو</string>
+    <string name="notif_title">جارٍ تحسين الفيديو…</string>
+    <string name="notif_done">اكتمل التحسين</string>
+    <string name="notif_failed">فشل التحسين</string>
+    <string name="notif_cancel">إلغاء</string>
+</resources>
