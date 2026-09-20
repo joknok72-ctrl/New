@@ -68,10 +68,16 @@
 
 **Modes in the app:** `Device` (offline) · `Hybrid` (device + cloud in parallel, auto-fallback) · `Cloud only` (upload clip ≤ 60 MB).
 
-**To turn on the Kaggle T4 backend (fastest):**
-1. Upload `cloud/kaggle/kaggle_gpu_backend.ipynb` to Kaggle → Settings → Accelerator **GPU T4 x2**, Internet **On**
-2. Add-ons → Secrets: `ADMIN_KEY` (from your keystore backup folder) and `WORKER_URL`
-3. Run All. The notebook registers itself with the Worker; the app uses it automatically. When the session ends the Worker falls back to HF.
+**Kaggle 2× T4 backend (fastest, dedicated) — one command:**
+```bash
+export KAGGLE_API_TOKEN=KGAT_...   # kaggle.com → Settings → API
+export ADMIN_KEY=...               # Worker admin key
+./cloud/kaggle/launch.sh <kaggle_username>
+```
+The script pushes `cloud/kaggle/backend.py` as a private GPU kernel. In ~3 min it prints `✅ Kaggle GPU is now the primary backend`.
+The backend loads all 4 models on **both** T4s, splits video frames across the two GPUs, skips duplicate frames, encodes with NVENC, muxes the original audio, and auto-unregisters when the 12 h session ends (the Worker then falls back to HF ZeroGPU).
+
+Measured: 6 s 144p clip → 1024×576 in **9 s** end-to-end (upload + GPU + download). Single frame ×4 ≈ 3 s; Ultra+ (RRDBNet) ≈ 3 s too — the GPU makes the heavy model free.
 
 **Deploy the Worker yourself:** `cd cloud/worker && wrangler r2 bucket create upscaler-cache && wrangler secret put ADMIN_KEY && wrangler deploy`
 
