@@ -25,6 +25,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -57,6 +58,16 @@ class UpscalePipeline(private val ctx: Context) {
 
     private val _state = MutableStateFlow<UpscaleState>(UpscaleState.Idle)
     val state: StateFlow<UpscaleState> = _state
+
+    /** Pause gate — when true the AI stage idles (decoder/encoder queues simply fill up and block). */
+    val paused = MutableStateFlow(false)
+    private var pausedTotalMs = 0L
+    private suspend fun awaitResume() {
+        if (!paused.value) return
+        val t = SystemClock.elapsedRealtime()
+        paused.first { !it }
+        pausedTotalMs += SystemClock.elapsedRealtime() - t
+    }
 
     suspend fun run(job: UpscaleJob): Unit = withContext(Dispatchers.Default) {
         val t0 = SystemClock.elapsedRealtime()
@@ -156,9 +167,9 @@ class UpscalePipeline(private val ctx: Context) {
                     } finally { decodedQ.send(null) }
                 }
 
+                val thermal = ThermalGuard(ctx)
                 // Stage 2: AI
                 launch(Dispatchers.Default) {
-                    val thermal = ThermalGuard(ctx)
                     var prevLow: IntArray? = null
                     val prevLowBuf = IntArray(srcW * srcH)
                     var lastOut: IntArray? = null
@@ -168,6 +179,7 @@ class UpscalePipeline(private val ctx: Context) {
                             val f = decodedQ.receive() ?: break
                             val out = upscaledPool.receive()
                             thermal.cooldownIfNeeded()
+                            awaitResume()
                             val a = analyzer.analyze(f.pixels, srcW, srcH)
                             if (a.isSceneCut) stabilizer?.reset()
 
@@ -216,14 +228,14 @@ class UpscalePipeline(private val ctx: Context) {
                         val now = SystemClock.elapsedRealtime()
                         if (now - lastReport > 400) {
                             lastReport = now
-                            val el = (now - t0) / 1000f
+                            val el = (now - t0 - pausedTotalMs - thermal.pausedMs) / 1000f
                             val fps = processed / el.coerceAtLeast(0.001f)
                             val remaining = (totalFrames - processed).coerceAtLeast(0)
                             _state.value = UpscaleState.Running(
                                 frame = processed, totalFrames = totalFrames,
                                 progress = (processed.toFloat() / totalFrames).coerceIn(0f, 0.999f),
                                 fps = fps, etaSeconds = (remaining / fps.coerceAtLeast(0.01f)).toLong(),
-                                skipped = skipped, provider = provider,
+                                skipped = skipped, provider = provider, paused = paused.value,
                                 inputRes = "${info.displayWidth}×${info.displayHeight}",
                                 outputRes = "${outW}×$outH", elapsedSeconds = el.toLong(),
                             )

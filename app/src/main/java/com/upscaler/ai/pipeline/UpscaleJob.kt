@@ -35,6 +35,7 @@ sealed class UpscaleState {
         val inputRes: String,
         val outputRes: String,
         val elapsedSeconds: Long,
+        val paused: Boolean = false,
     ) : UpscaleState()
     data class Done(
         val inputUri: Uri,

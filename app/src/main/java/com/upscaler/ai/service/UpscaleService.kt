@@ -52,6 +52,10 @@ class UpscaleService : Service() {
         private const val ACTION_CANCEL_CURRENT = "com.upscaler.ai.CANCEL_CURRENT"
         private const val ACTION_CANCEL_ALL = "com.upscaler.ai.CANCEL_ALL"
         private const val ACTION_REMOVE = "com.upscaler.ai.REMOVE"
+        private const val ACTION_PAUSE = "com.upscaler.ai.PAUSE"
+        private const val ACTION_RESUME = "com.upscaler.ai.RESUME"
+        @Volatile private var currentPipeline: UpscalePipeline? = null
+        val isPaused get() = currentPipeline?.paused?.value == true
 
         private val _state = MutableStateFlow<UpscaleState>(UpscaleState.Idle)
         /** State of the *currently running* job. */
@@ -83,6 +87,8 @@ class UpscaleService : Service() {
             if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i) else ctx.startService(i)
         }
 
+        fun pause(ctx: Context) = ctx.startService(Intent(ctx, UpscaleService::class.java).apply { action = ACTION_PAUSE })
+        fun resume(ctx: Context) = ctx.startService(Intent(ctx, UpscaleService::class.java).apply { action = ACTION_RESUME })
         fun cancelCurrent(ctx: Context) = ctx.startService(Intent(ctx, UpscaleService::class.java).apply { action = ACTION_CANCEL_CURRENT })
         fun cancelAll(ctx: Context) = ctx.startService(Intent(ctx, UpscaleService::class.java).apply { action = ACTION_CANCEL_ALL })
         fun remove(ctx: Context, id: Long) = ctx.startService(Intent(ctx, UpscaleService::class.java).apply { action = ACTION_REMOVE; putExtra("id", id) })
@@ -106,7 +112,9 @@ class UpscaleService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_CANCEL_CURRENT -> currentJob?.cancel()
+            ACTION_CANCEL_CURRENT -> { currentPipeline?.paused?.value = false; currentJob?.cancel() }
+            ACTION_PAUSE -> currentPipeline?.paused?.value = true
+            ACTION_RESUME -> currentPipeline?.paused?.value = false
             ACTION_CANCEL_ALL -> {
                 items.filter { it.status == QueuedJob.Status.WAITING }.forEach { it.status = QueuedJob.Status.CANCELLED }
                 publish(); currentJob?.cancel()
@@ -146,6 +154,7 @@ class UpscaleService : Service() {
                 val next = items.firstOrNull { it.status == QueuedJob.Status.WAITING } ?: break
                 next.status = QueuedJob.Status.RUNNING; publish()
                 val p = UpscalePipeline(this@UpscaleService)
+                currentPipeline = p
                 val queuedLeft = items.count { it.status == QueuedJob.Status.WAITING }
                 currentJob = launch {
                     val collector = launch {
@@ -154,6 +163,7 @@ class UpscaleService : Service() {
                     try { p.run(next.job) } finally { collector.cancel() }
                 }
                 currentJob?.join()
+                currentPipeline = null
                 val res = p.state.value
                 next.result = res
                 next.status = when (res) {
@@ -193,6 +203,10 @@ class UpscaleService : Service() {
         val cancel = PendingIntent.getService(this, 1,
             Intent(this, UpscaleService::class.java).apply { action = ACTION_CANCEL_CURRENT },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val pausedNow = isPaused
+        val pauseToggle = PendingIntent.getService(this, 2,
+            Intent(this, UpscaleService::class.java).apply { action = if (pausedNow) ACTION_RESUME else ACTION_PAUSE },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val b = NotificationCompat.Builder(this, UpscalerApp.CHANNEL_PROGRESS)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title ?: getString(R.string.app_name))
@@ -203,6 +217,7 @@ class UpscaleService : Service() {
             .setSilent(true)
         if (!done) {
             b.setProgress(100, progress, indeterminate)
+            b.addAction(0, if (pausedNow) "▶" else "⏸", pauseToggle)
             b.addAction(0, getString(R.string.notif_cancel), cancel)
         }
         return b.build()
