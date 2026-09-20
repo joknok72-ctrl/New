@@ -6,7 +6,10 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.upscaler.ai.engine.ColorMode
+import com.upscaler.ai.engine.ContentAnalyzer
 import com.upscaler.ai.engine.DeviceProfiler
+import com.upscaler.ai.engine.ModelStore
 import com.upscaler.ai.engine.PreviewEngine
 import com.upscaler.ai.engine.QualityPreset
 import com.upscaler.ai.engine.TargetResolution
@@ -32,18 +35,24 @@ data class Settings(
     val antiFlicker: Boolean = true,
     val hevc: Boolean = true,
     val gpu: Boolean = true,
+    val color: ColorMode = ColorMode.OFF,
+    val autoModel: Boolean = true,
 ) {
     fun toJson() = JSONObject().apply {
         put("model", model.name); put("preset", preset.name); put("target", target.name)
         put("sharpen", sharpen.toDouble()); put("antiFlicker", antiFlicker); put("hevc", hevc); put("gpu", gpu)
+        put("color", color.name); put("autoModel", autoModel)
     }
     companion object {
         fun fromJson(o: JSONObject) = Settings(
             UpscaleModel.fromName(o.optString("model")), QualityPreset.fromName(o.optString("preset")),
             TargetResolution.fromName(o.optString("target")), o.optDouble("sharpen", 0.3).toFloat(),
-            o.optBoolean("antiFlicker", true), o.optBoolean("hevc", true), o.optBoolean("gpu", true))
+            o.optBoolean("antiFlicker", true), o.optBoolean("hevc", true), o.optBoolean("gpu", true),
+            ColorMode.fromName(o.optString("color")), o.optBoolean("autoModel", true))
     }
 }
+
+data class ModelDownloadState(val model: UpscaleModel? = null, val progress: Float = 0f, val error: String? = null)
 
 /** One selected source video with its metadata. */
 data class SourceItem(val uri: Uri, val info: VideoInfo?, val thumb: Bitmap?)
@@ -73,6 +82,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val trim: StateFlow<Pair<Long, Long>> = _trim
     private val _showHistory = MutableStateFlow(false)
     val showHistory: StateFlow<Boolean> = _showHistory
+    private val _analysis = MutableStateFlow<ContentAnalyzer.Analysis?>(null)
+    val analysis: StateFlow<ContentAnalyzer.Analysis?> = _analysis
+    private val _download = MutableStateFlow(ModelDownloadState())
+    val download: StateFlow<ModelDownloadState> = _download
+    private val _modelsAvailable = MutableStateFlow(UpscaleModel.entries.associateWith { ModelStore.isAvailable(app, it) })
+    val modelsAvailable: StateFlow<Map<UpscaleModel, Boolean>> = _modelsAvailable
 
     val state: StateFlow<UpscaleState> = UpscaleService.state
     val queue: StateFlow<List<QueuedJob>> = UpscaleService.queue
@@ -86,6 +101,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         UpscaleService.clearFinished()
         _preview.value = PreviewState()
         _trim.value = 0L to 0L
+        if (_sources.value.isEmpty()) _analysis.value = null
         val existing = _sources.value.map { it.uri }.toSet()
         val fresh = uris.filter { it !in existing }.map { SourceItem(it, null, null) }
         _sources.value = _sources.value + fresh
@@ -98,7 +114,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     val th = mmr.getFrameAtTime(minOf(i.durationMs, 2000L) * 1000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                     mmr.release()
                     _sources.value = _sources.value.map { if (it.uri == item.uri) it.copy(info = i, thumb = th) else it }
-                    if (_sources.value.firstOrNull()?.uri == item.uri) autoTarget(i)
+                    if (_sources.value.firstOrNull()?.uri == item.uri) {
+                        autoTarget(i)
+                        val a = ContentAnalyzer.analyze(ctx, item.uri, i.durationMs)
+                        _analysis.value = a
+                        if (_settings.value.autoModel) {
+                            val curr = _settings.value
+                            // don't override an explicitly downloaded Ultra+ choice
+                            if (curr.model != UpscaleModel.ULTRA_PLUS) update { it.copy(model = a.recommended) }
+                            if (a.recommendColorFix && curr.color == ColorMode.OFF) update { it.copy(color = ColorMode.AUTO) }
+                        }
+                    }
                 } catch (_: Throwable) {
                     _sources.value = _sources.value.filter { it.uri != item.uri }
                 }
@@ -107,7 +133,31 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun removeSource(uri: Uri) { _sources.value = _sources.value.filter { it.uri != uri } }
-    fun clearSources() { _sources.value = emptyList(); _preview.value = PreviewState(); _trim.value = 0L to 0L }
+    fun clearSources() { _sources.value = emptyList(); _preview.value = PreviewState(); _trim.value = 0L to 0L; _analysis.value = null }
+
+    fun downloadModel(m: UpscaleModel) {
+        if (!m.isDownloadable || _download.value.model != null) return
+        _download.value = ModelDownloadState(m, 0f)
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                ModelStore.download(ctx, m) { p -> _download.value = ModelDownloadState(m, p) }
+                _modelsAvailable.value = UpscaleModel.entries.associateWith { ModelStore.isAvailable(ctx, it) }
+                _download.value = ModelDownloadState()
+                update { it.copy(model = m) }
+            } catch (t: Throwable) {
+                _download.value = ModelDownloadState(null, 0f, t.message ?: "download failed")
+            }
+        }
+    }
+
+    fun deleteModel(m: UpscaleModel) {
+        ModelStore.delete(ctx, m)
+        _modelsAvailable.value = UpscaleModel.entries.associateWith { ModelStore.isAvailable(ctx, it) }
+        if (_settings.value.model == m) update { it.copy(model = UpscaleModel.GENERAL) }
+    }
+
+    fun pause() = UpscaleService.pause(ctx)
+    fun resume() = UpscaleService.resume(ctx)
 
     private fun autoTarget(i: VideoInfo) {
         val s = _settings.value
@@ -118,6 +168,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         update { s.copy(target = t) }
     }
+
+    fun pickModel(m: UpscaleModel) = update { it.copy(model = m, autoModel = false) }
 
     fun update(block: (Settings) -> Settings) {
         val new = block(_settings.value)
@@ -193,7 +245,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val s = _settings.value
         _sources.value.forEachIndexed { idx, src ->
             val (a, b) = if (idx == 0) _trim.value else 0L to 0L
-            UpscaleService.enqueue(ctx, UpscaleJob(src.uri, s.model, s.preset, s.target, s.sharpen, s.antiFlicker, s.hevc, s.gpu, a, b),
+            UpscaleService.enqueue(ctx, UpscaleJob(src.uri, s.model, s.preset, s.target, s.sharpen, s.antiFlicker, s.hevc, s.gpu, a, b, s.color),
                 src.info?.displayName ?: "video")
         }
     }
@@ -205,7 +257,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val start = _trim.value.first
         val info = src.info
         val end = minOf(start + 10_000, info?.durationMs ?: (start + 10_000))
-        UpscaleService.enqueue(ctx, UpscaleJob(src.uri, s.model, s.preset, s.target, s.sharpen, s.antiFlicker, s.hevc, s.gpu, start, end),
+        UpscaleService.enqueue(ctx, UpscaleJob(src.uri, s.model, s.preset, s.target, s.sharpen, s.antiFlicker, s.hevc, s.gpu, start, end, s.color),
             "TEST 10s • " + (info?.displayName ?: "video"))
     }
 

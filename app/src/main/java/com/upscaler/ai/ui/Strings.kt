@@ -77,6 +77,19 @@ object S {
     val thermalNote get() = t("التطبيق يبرّد الجهاز تلقائياً لو سخن", "The app auto-pauses if the phone overheats")
     val allDone get() = t("اكتملت كل الفيديوهات", "All videos done")
     val perVideo get() = t("لكل فيديو", "per video")
+    // v1.2
+    val autoDetect get() = t("اكتشاف تلقائي", "Auto-detect")
+    val autoModelOn get() = t("اختيار الموديل تلقائياً", "Pick model automatically")
+    val colorMode get() = t("تحسين الألوان (GPU)", "Colour enhancement (GPU)")
+    val colorSuggested get() = t("الفيديو باهت/غامق — نقترح تحسين الألوان", "Video looks washed-out/dark — colour fix suggested")
+    val downloadModel get() = t("تحميل", "Download")
+    val downloading get() = t("جارٍ التحميل", "Downloading")
+    val deleteModel get() = t("حذف الموديل", "Delete model")
+    val notDownloaded get() = t("غير محمَّل", "Not downloaded")
+    val pause get() = t("إيقاف مؤقت", "Pause")
+    val resumeBtn get() = t("استكمال", "Resume")
+    val pausedLabel get() = t("متوقف مؤقتاً", "Paused")
+    val compareHint get() = t("اسحب للمقارنة", "Drag to compare")
     val howItWorks get() = t("كيف يعمل؟", "How it works")
     val howItWorksBody get() = t(
         "1) يفك الفيديو بالهاردوير\n2) شبكة Real-ESRGAN تكبّر كل فريم ×4 على GPU/NPU\n3) يتخطى الفريمات المكررة ويثبّت النتيجة زمنياً\n4) يعيد الترميز HEVC مع نسخ الصوت الأصلي بدون فقدان",
