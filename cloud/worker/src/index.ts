@@ -24,7 +24,23 @@ export interface Env {
 }
 
 /** args=3 → backend accepts (file, scale, model) like our Kaggle notebook; args=2 → (file, scale) like public HF spaces */
-type Backend = { host: string; fnImage: number; fnVideo: number; kind: "gradio"; args: 2 | 3 };
+type Backend = { host: string; fnImage: number; fnVideo: number; kind: "gradio"; args: 2 | 3; prefix?: string };
+
+const prefixCache = new Map<string, string>();
+/** Gradio 5 serves the API under /gradio_api; Gradio 4 at root. Detect once per host. */
+async function apiPrefix(b: Backend): Promise<string> {
+  if (b.prefix !== undefined) return b.prefix;
+  const c = prefixCache.get(b.host);
+  if (c !== undefined) { b.prefix = c; return c; }
+  let p = "";
+  try {
+    const r = await fetch(b.host + "/config", { signal: AbortSignal.timeout(8000) });
+    const j: any = r.ok ? await r.json() : {};
+    if (typeof j?.api_prefix === "string") p = j.api_prefix.replace(/\/$/, "");
+  } catch {}
+  prefixCache.set(b.host, p); b.prefix = p;
+  return p;
+}
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -68,7 +84,7 @@ async function backends(env: Env): Promise<Backend[]> {
 async function probe(b: Backend): Promise<{ host: string; up: boolean; latencyMs: number; queue?: number }> {
   const t = Date.now();
   try {
-    const r = await fetch(b.host + "/queue/status", { signal: AbortSignal.timeout(6000) });
+    const r = await fetch(b.host + (await apiPrefix(b)) + "/queue/status", { signal: AbortSignal.timeout(6000) });
     const j: any = r.ok ? await r.json().catch(() => ({})) : {};
     return { host: b.host, up: r.ok, latencyMs: Date.now() - t, queue: j?.queue_size };
   } catch {
@@ -76,14 +92,23 @@ async function probe(b: Backend): Promise<{ host: string; up: boolean; latencyMs
   }
 }
 
+async function pickBackends(env: Env): Promise<Backend[]> {
+  const list = await backends(env);
+  const probes = await Promise.all(list.map(probe));
+  return list.map((b, i) => ({ b, p: probes[i], i })).filter((x) => x.p.up)
+    .sort((a, b) => Math.floor((a.p.queue ?? 0) / 3) - Math.floor((b.p.queue ?? 0) / 3) || a.i - b.i).map((x) => x.b);
+}
+
 async function pickBackend(env: Env): Promise<Backend> {
   const list = await backends(env);
   const probes = await Promise.all(list.map(probe));
-  // prefer up, then smallest queue, then latency
+  // Order in the list = priority (dedicated Kaggle first, shared HF last). Among "up" backends,
+  // keep list order unless one is clearly congested (queue >= 3) — tunnel latency is irrelevant
+  // next to GPU time, so we don't sort by it.
   const ranked = list
-    .map((b, i) => ({ b, p: probes[i] }))
+    .map((b, i) => ({ b, p: probes[i], i }))
     .filter((x) => x.p.up)
-    .sort((a, b) => (a.p.queue ?? 0) - (b.p.queue ?? 0) || a.p.latencyMs - b.p.latencyMs);
+    .sort((a, b) => Math.floor((a.p.queue ?? 0) / 3) - Math.floor((b.p.queue ?? 0) / 3) || a.i - b.i);
   if (!ranked.length) throw new Error("no GPU backend available");
   return ranked[0].b;
 }
@@ -92,7 +117,7 @@ async function health(env: Env) {
   const list = await backends(env);
   const probes = await Promise.all(list.map(probe));
   const primary = probes.find((p) => p.up)?.host ?? null;
-  return json({ ok: probes.some((p) => p.up), primary, gpu: primary ? (primary.includes("hf.space") ? "HF ZeroGPU (A10G, shared)" : "Kaggle T4 (dedicated)") : null, backends: probes, version: 2 });
+  return json({ ok: probes.some((p) => p.up), primary, gpu: primary ? (primary.includes("hf.space") ? "HF ZeroGPU (A10G, shared)" : "Kaggle 2× T4 (dedicated)") : null, backends: probes, version: 2 });
 }
 
 async function setBackends(req: Request, env: Env) {
@@ -107,27 +132,28 @@ async function setBackends(req: Request, env: Env) {
 async function gradioUpload(b: Backend, blob: Blob, name: string): Promise<string> {
   const fd = new FormData();
   fd.append("files", blob, name);
-  const r = await fetch(b.host + "/upload", { method: "POST", body: fd, signal: AbortSignal.timeout(120_000) });
+  const r = await fetch(b.host + (await apiPrefix(b)) + "/upload", { method: "POST", body: fd, signal: AbortSignal.timeout(120_000) });
   if (!r.ok) throw new Error(`upload ${r.status}`);
   const arr: string[] = await r.json();
   return arr[0];
 }
 
 function fileData(b: Backend, path: string, name: string, mime: string, size: number) {
-  return { path, url: `${b.host}/file=${path}`, orig_name: name, mime_type: mime, size, meta: { _type: "gradio.FileData" } };
+  return { path, url: `${b.host}${b.prefix ?? ""}/file=${path}`, orig_name: name, mime_type: mime, size, meta: { _type: "gradio.FileData" } };
 }
 
 /** Runs a Gradio fn, streaming queue events to `onEvent`, resolves with output data array. */
 async function gradioRun(b: Backend, fnIndex: number, data: any[], onEvent?: (e: any) => void, timeoutMs = 600_000): Promise<any[]> {
   const session = crypto.randomUUID().replace(/-/g, "").slice(0, 11);
-  const j = await fetch(b.host + "/queue/join", {
+  const px = await apiPrefix(b);
+  const j = await fetch(b.host + px + "/queue/join", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ data, fn_index: fnIndex, session_hash: session }),
     signal: AbortSignal.timeout(30_000),
   });
   if (!j.ok) throw new Error(`queue/join ${j.status}`);
-  const s = await fetch(`${b.host}/queue/data?session_hash=${session}`, { signal: AbortSignal.timeout(timeoutMs) });
+  const s = await fetch(`${b.host}${px}/queue/data?session_hash=${session}`, { signal: AbortSignal.timeout(timeoutMs) });
   if (!s.ok || !s.body) throw new Error(`queue/data ${s.status}`);
   const reader = s.body.getReader();
   const dec = new TextDecoder();
@@ -170,19 +196,28 @@ async function frame(req: Request, env: Env, ctx: ExecutionContext) {
   const cached = await env.R2.get(key);
   if (cached) return new Response(cached.body, { headers: { ...CORS, "Content-Type": "image/webp", "X-Cache": "HIT" } });
 
-  const b = await pickBackend(env);
   const ext = mime.includes("jpeg") ? "jpg" : mime.includes("webp") ? "webp" : "png";
-  const path = await gradioUpload(b, new Blob([body], { type: mime }), `f.${ext}`);
   const model = url.searchParams.get("model") || "general";
-  const args: any[] = [fileData(b, path, `f.${ext}`, mime, body.byteLength), scale];
-  if (b.args === 3) args.push(model);
-  const out = await gradioRun(b, b.fnImage, args, undefined, 180_000);
-  const outUrl: string = out[0]?.url ?? `${b.host}/file=${out[0]?.path}`;
-  const img = await fetch(outUrl, { signal: AbortSignal.timeout(60_000) });
-  if (!img.ok) throw new Error(`fetch result ${img.status}`);
-  const bytes = await img.arrayBuffer();
-  ctx.waitUntil(env.R2.put(key, bytes, { httpMetadata: { contentType: "image/webp" } }));
-  return new Response(bytes, { headers: { ...CORS, "Content-Type": img.headers.get("Content-Type") || "image/webp", "X-Cache": "MISS", "X-Backend": b.host } });
+  const candidates = await pickBackends(env);
+  if (!candidates.length) throw new Error("no GPU backend available");
+  let lastErr: any = null;
+  for (const b of candidates) {
+    try {
+      const path = await gradioUpload(b, new Blob([body], { type: mime }), `f.${ext}`);
+      const args: any[] = [fileData(b, path, `f.${ext}`, mime, body.byteLength), scale];
+      if (b.args === 3) args.push(model);
+      const out = await gradioRun(b, b.fnImage, args, undefined, 180_000);
+      const outUrl: string = out[0]?.url ?? `${b.host}${b.prefix ?? ""}/file=${out[0]?.path}`;
+      const img = await fetch(outUrl, { signal: AbortSignal.timeout(60_000) });
+      if (!img.ok) throw new Error(`fetch result ${img.status}`);
+      const bytes = await img.arrayBuffer();
+      ctx.waitUntil(env.R2.put(key, bytes, { httpMetadata: { contentType: "image/webp" } }));
+      return new Response(bytes, { headers: { ...CORS, "Content-Type": img.headers.get("Content-Type") || "image/webp", "X-Cache": "MISS", "X-Backend": b.host } });
+    } catch (e: any) {
+      lastErr = e; // try next backend
+    }
+  }
+  throw lastErr ?? new Error("all backends failed");
 }
 
 // ───────────────────────── /video ─────────────────────────
@@ -211,14 +246,17 @@ async function video(req: Request, env: Env, ctx: ExecutionContext) {
       await send({ stage: "uploading", backend: b.host });
       const path = await gradioUpload(b, new Blob([body], { type: "video/mp4" }), "in.mp4");
       await send({ stage: "queued" });
-      const vargs: any[] = [fileData(b, path, "in.mp4", "video/mp4", body.byteLength), scale];
+      const fd = fileData(b, path, "in.mp4", "video/mp4", body.byteLength);
+      // Gradio 5 Video component wants { video: FileData, subtitles: null }; Gradio 4 wants FileData
+      const vin: any = (b.prefix ?? "") ? { video: fd, subtitles: null } : fd;
+      const vargs: any[] = [vin, scale];
       if (b.args === 3) vargs.push(url.searchParams.get("model") || "general");
       const out = await gradioRun(b, b.fnVideo, vargs, (ev) => {
         if (ev.msg === "estimation") send({ stage: "queued", rank: ev.rank, eta: ev.rank_eta });
         else if (ev.msg === "process_starts") send({ stage: "processing", eta: ev.eta });
         else if (ev.msg === "log") send({ stage: "processing", log: ev.log });
       }, 900_000);
-      const outUrl: string = out[0]?.video?.url ?? out[0]?.url ?? `${b.host}/file=${out[0]?.video?.path ?? out[0]?.path}`;
+      const outUrl: string = out[0]?.video?.url ?? out[0]?.url ?? `${b.host}${b.prefix ?? ""}/file=${out[0]?.video?.path ?? out[0]?.path}`;
       await send({ stage: "downloading" });
       const r = await fetch(outUrl, { signal: AbortSignal.timeout(300_000) });
       if (!r.ok || !r.body) throw new Error(`fetch result ${r.status}`);
