@@ -9,6 +9,7 @@ import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
 import com.upscaler.ai.engine.DeviceProfiler
+import com.upscaler.ai.engine.ModelStore
 import com.upscaler.ai.engine.QualityPreset
 import com.upscaler.ai.engine.SuperResolutionEngine
 import com.upscaler.ai.engine.TargetResolution
@@ -102,6 +103,11 @@ class UpscalePipeline(private val ctx: Context) {
 
             // ---- Engines -----------------------------------------------------------------
             if (useAi) {
+                if (!ModelStore.isAvailable(ctx, job.model)) {
+                    ModelStore.download(ctx, job.model) { p ->
+                        _state.value = UpscaleState.Preparing("Downloading ${job.model.displayNameEn} ${(p * 100).toInt()}%")
+                    }
+                }
                 _state.value = UpscaleState.Preparing("Loading AI model (${job.model.displayNameEn})…")
                 engine = SuperResolutionEngine(ctx, job.model, profile, preferNnapi = job.useGpu)
             }
@@ -197,6 +203,7 @@ class UpscalePipeline(private val ctx: Context) {
                 launch(Dispatchers.IO) {
                     val r = GlFrameRenderer(encSurface, encW, encH).also {
                         it.sharpenAmount = if (useAi) job.sharpen * 0.6f else (0.35f + job.sharpen * 0.6f)
+                        it.colorMode = job.colorMode.ordinal
                     }
                     renderer = r
                     while (isActive) {

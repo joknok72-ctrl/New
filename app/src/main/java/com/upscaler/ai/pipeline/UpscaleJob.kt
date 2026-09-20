@@ -1,6 +1,7 @@
 package com.upscaler.ai.pipeline
 
 import android.net.Uri
+import com.upscaler.ai.engine.ColorMode
 import com.upscaler.ai.engine.QualityPreset
 import com.upscaler.ai.engine.TargetResolution
 import com.upscaler.ai.engine.UpscaleModel
@@ -17,6 +18,7 @@ data class UpscaleJob(
     /** Optional trim range in ms. endMs <= 0 means "to the end". */
     val startMs: Long = 0,
     val endMs: Long = 0,
+    val colorMode: ColorMode = ColorMode.OFF,
 )
 
 sealed class UpscaleState {

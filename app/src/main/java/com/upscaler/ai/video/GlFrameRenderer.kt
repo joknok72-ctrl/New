@@ -44,6 +44,9 @@ class GlFrameRenderer(
     private val vertexBuf: FloatBuffer
 
     var sharpenAmount: Float = 0.0f
+    /** 0 = off, 1 = auto, 2 = vivid */
+    var colorMode: Int = 0
+    private var uColor = 0
 
     init {
         val verts = floatArrayOf(
@@ -94,9 +97,20 @@ class GlFrameRenderer(
         val fs = """#version 300 es
             precision highp float;
             in vec2 vUv; out vec4 frag;
-            uniform sampler2D uTex; uniform vec2 uTexel; uniform float uSharpen;
+            uniform sampler2D uTex; uniform vec2 uTexel; uniform float uSharpen; uniform int uColor;
+            vec3 grade(vec3 c, float contrast, float sat, float lift) {
+                // contrast around mid-grey with a soft S-curve, then saturation, then black lift
+                c = (c - 0.5) * contrast + 0.5;
+                c = mix(c, smoothstep(0.0, 1.0, c), 0.35);
+                float l = dot(c, vec3(0.299, 0.587, 0.114));
+                c = mix(vec3(l), c, sat);
+                c = c * (1.0 - lift) + lift * 0.5;
+                return clamp(c, 0.0, 1.0);
+            }
             void main() {
                 vec3 c = texture(uTex, vUv).rgb;
+                if (uColor == 1)      c = grade(c, 1.12, 1.15, 0.0);
+                else if (uColor == 2) c = grade(c, 1.22, 1.35, 0.0);
                 if (uSharpen > 0.001) {
                     // Adaptive unsharp mask: 3x3 blur, add back the high-pass, protect edges from ringing
                     vec3 s = vec3(0.0);
@@ -122,6 +136,7 @@ class GlFrameRenderer(
         uTexel = GLES20.glGetUniformLocation(program, "uTexel")
         uSharpen = GLES20.glGetUniformLocation(program, "uSharpen")
         uRotation = GLES20.glGetUniformLocation(program, "uRotation")
+        uColor = GLES20.glGetUniformLocation(program, "uColor")
 
         val t = IntArray(1)
         GLES20.glGenTextures(1, t, 0)
@@ -156,6 +171,7 @@ class GlFrameRenderer(
         GLES20.glUniform2f(uTexel, 1f / w, 1f / h)
         GLES20.glUniform1f(uSharpen, sharpenAmount)
         GLES20.glUniform1i(uRotation, rotation)
+        GLES20.glUniform1i(uColor, colorMode)
         vertexBuf.position(0)
         GLES20.glVertexAttribPointer(aPos, 2, GLES20.GL_FLOAT, false, 16, vertexBuf)
         GLES20.glEnableVertexAttribArray(aPos)
