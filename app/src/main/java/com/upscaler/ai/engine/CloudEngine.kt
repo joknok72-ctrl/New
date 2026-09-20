@@ -29,6 +29,7 @@ class CloudEngine(private val baseUrl: String = DEFAULT_URL) {
         private const val TAG = "CloudEngine"
 
         fun modelParam(m: UpscaleModel) = when (m) {
+            UpscaleModel.NATURAL -> "natural"
             UpscaleModel.GENERAL -> "general"
             UpscaleModel.GENERAL_DENOISE -> "wdn"
             UpscaleModel.ANIME -> "anime"

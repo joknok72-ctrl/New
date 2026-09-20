@@ -214,11 +214,30 @@ def export(name, fname, num_feat, num_conv):
     print(f"  OK {name}: {y.shape}  ({size_mb:.1f} MB)")
 
 
+def export_blend(name, fa, fb, wa, out_dir):
+    """Official Real-ESRGAN 'denoise_strength' trick: linear interpolation of general and wdn weights.
+    50/50 gives noticeably softer, more natural output than pure general on video."""
+    os.makedirs("weights", exist_ok=True)
+    pa = os.path.join("weights", fa); pb = os.path.join("weights", fb)
+    download(BASE + fa, pa); download(BASE + fb, pb)
+    sa = torch.load(pa, map_location="cpu", weights_only=True); sa = sa.get("params", sa.get("params_ema", sa))
+    sb = torch.load(pb, map_location="cpu", weights_only=True); sb = sb.get("params", sb.get("params_ema", sb))
+    st = {k: sa[k] * wa + sb[k] * (1 - wa) for k in sa}
+    model = SRVGGNetCompact(num_feat=64, num_conv=32, upscale=4, act_type="prelu")
+    model.load_state_dict(st, strict=True); model.eval()
+    out_path = os.path.join(out_dir, f"{name}.onnx")
+    torch.onnx.export(model, torch.rand(1, 3, 64, 64), out_path, opset_version=17, input_names=["input"], output_names=["output"],
+                      dynamic_axes={"input": {2: "h", 3: "w"}, "output": {2: "h4", 3: "w4"}}, do_constant_folding=True, dynamo=False)
+    print(f"  OK {name} ({os.path.getsize(out_path) / 1e6:.1f} MB)")
+
+
 if __name__ == "__main__":
     os.makedirs(OUT_DIR, exist_ok=True)
     for n, (f, nf, nc) in MODELS.items():
         print(f"[export] {n}")
         export(n, f, nf, nc)
+    print("[export] realesr-general-natural-x4v3 (50/50 general+wdn)")
+    export_blend("realesr-general-natural-x4v3", "realesr-general-x4v3.pth", "realesr-general-wdn-x4v3.pth", 0.5, OUT_DIR)
     big_dir = sys.argv[2] if len(sys.argv) > 2 else "dist/models"
     os.makedirs(big_dir, exist_ok=True)
     for n, (u, nb) in BIG_MODELS.items():

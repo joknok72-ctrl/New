@@ -30,7 +30,7 @@ import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 data class Settings(
-    val model: UpscaleModel = UpscaleModel.GENERAL,
+    val model: UpscaleModel = UpscaleModel.NATURAL,
     val preset: QualityPreset = QualityPreset.BALANCED,
     val target: TargetResolution = TargetResolution.P1080,
     val sharpen: Float = 0.3f,
@@ -162,7 +162,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun deleteModel(m: UpscaleModel) {
         ModelStore.delete(ctx, m)
         _modelsAvailable.value = UpscaleModel.entries.associateWith { ModelStore.isAvailable(ctx, it) }
-        if (_settings.value.model == m) update { it.copy(model = UpscaleModel.GENERAL) }
+        if (_settings.value.model == m) update { it.copy(model = UpscaleModel.NATURAL) }
     }
 
     fun pause() = UpscaleService.pause(ctx)

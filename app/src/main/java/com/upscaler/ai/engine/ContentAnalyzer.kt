@@ -38,7 +38,7 @@ object ContentAnalyzer {
             val ts = listOf(0.15, 0.5, 0.85).map { (durationMs * it).toLong() * 1000 }
             for (t in ts) mmr.getFrameAtTime(t, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)?.let { frames.add(it) }
         } catch (_: Throwable) {} finally { mmr.release() }
-        if (frames.isEmpty()) return Analysis(UpscaleModel.GENERAL, 0f, 0f, 0f, 0.5f, false, "افتراضي", "default")
+        if (frames.isEmpty()) return Analysis(UpscaleModel.NATURAL, 0f, 0f, 0f, 0.5f, false, "افتراضي", "default")
 
         var anime = 0f; var block = 0f; var dark = 0f; var sat = 0f
         for (f in frames) {
@@ -52,7 +52,7 @@ object ContentAnalyzer {
         val (model, ar, en) = when {
             anime > 0.6f -> Triple(UpscaleModel.ANIME, "اكتشفنا رسوم متحركة → موديل الأنمي (أسرع وأدق للخطوط)", "Animation detected → anime model (faster, crisper lines)")
             block > 0.55f -> Triple(UpscaleModel.GENERAL_DENOISE, "ضغط شديد وبلوكات → موديل إزالة التشويش", "Heavy compression artifacts → denoise model")
-            else -> Triple(UpscaleModel.GENERAL, "فيديو واقعي → الموديل العام", "Real footage → general model")
+            else -> Triple(UpscaleModel.NATURAL, "فيديو واقعي → الموديل الطبيعي (بدون مظهر بلاستيكي)", "Real footage → natural model (no plastic look)")
         }
         return Analysis(model, anime, block, dark, sat, colorFix, ar, en)
     }

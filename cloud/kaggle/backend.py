@@ -55,8 +55,16 @@ def build(kind, gpu):
     else: net = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=32, upscale=4, act_type="prelu")
     return RealESRGANer(scale=4, model_path=f"weights/{kind}.pth", model=net, tile=0, half=True, gpu_id=gpu)
 
+def build_blend(gpu, dni=0.5):
+    """realesr-general with denoise_strength (official Real-ESRGAN --dni). Softer, more natural."""
+    net = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=32, upscale=4, act_type="prelu")
+    return RealESRGANer(scale=4, model_path=["weights/general.pth", "weights/wdn.pth"], dni_weight=[dni, 1 - dni],
+                        model=net, tile=0, half=True, gpu_id=gpu)
+
 # one full set of models per GPU → true dual-GPU parallelism
 UPS = [{k: build(k, g) for k in W} for g in range(max(NGPU, 1))]
+for g in range(len(UPS)):
+    UPS[g]["natural"] = build_blend(g, 0.5)   # 50/50 general+denoise → far less "plastic"
 LOCKS = [threading.Lock() for _ in UPS]
 _rr = [0]
 
@@ -108,11 +116,19 @@ def infer_video(path: str, scale: int, model: str = "general", natural: float = 
     todo = [i for i in range(total) if dup_of[i] == -1]
     done = [0]
 
+    # model routing for natural look: at natural>=0.35 swap the sharp "general" for the 50/50 blend
+    eff_model = "natural" if (model in ("general", "natural") and natural >= 0.35) else ("general" if model == "natural" else model)
+    # for tiny sources (<=240p) and high natural: pre-upscale x2 bicubic, then AI does only x2 of the work
+    pre2 = natural >= 0.75 and h0 <= 240
+
     def worker(g, idxs):
-        up = UPS[g].get(model, UPS[g]["general"])
+        up = UPS[g].get(eff_model, UPS[g]["general"])
         for i in idxs:
+            src_i = frames[i]
+            if pre2: src_i = cv2.resize(src_i, (w0 * 2, h0 * 2), interpolation=cv2.INTER_CUBIC)
             with LOCKS[g]:
-                out, _ = up.enhance(frames[i], outscale=scale)
+                out, _ = up.enhance(src_i, outscale=(scale / 2 if pre2 else scale))
+            if out.shape[1] != w or out.shape[0] != h: out = cv2.resize(out, (w, h), interpolation=cv2.INTER_AREA)
             results[i] = out
             done[0] += 1
             if done[0] % 10 == 0: progress(0.8 * done[0] / max(len(todo), 1), desc=f"AI {done[0]}/{len(todo)} on {len(UPS)} GPU(s)")
@@ -141,8 +157,8 @@ def infer_video(path: str, scale: int, model: str = "general", natural: float = 
             edge = cv2.GaussianBlur(np.sqrt(gx * gx + gy * gy), (0, 0), 1.5)
             edge = np.clip(edge / 40.0, 0, 1)
             edge = cv2.resize(edge, (w, h), interpolation=cv2.INTER_LINEAR)[..., None]
-            # ai weight: 1 on edges, (1-natural*0.7) on flat regions
-            wai = 1.0 - natural * 0.7 * (1.0 - edge)
+            # ai weight: 1 on edges, (1-natural*0.45) on flat regions
+            wai = 1.0 - natural * 0.45 * (1.0 - edge)
             cur = cur * wai + bic * (1.0 - wai)
             # (b) give back a whisper of the source's own fine grain so it doesn't look airbrushed
             grain = (bic - cv2.GaussianBlur(bic, (0, 0), 1.2)) * (0.35 * natural)
@@ -172,7 +188,7 @@ def infer_video(path: str, scale: int, model: str = "general", natural: float = 
     return final if r.returncode == 0 else raw
 
 # ── 3) Gradio server (fn 0 = image, fn 1 = video; 3 args each) ─────────────────────
-MODELS = list(W)
+MODELS = list(W) + ["natural"]
 with gr.Blocks() as demo:
     gr.Markdown(f"# Video Upscaler AI — Kaggle backend ({NGPU}× {torch.cuda.get_device_name(0) if NGPU else 'CPU'})")
     with gr.Tab("Image"):

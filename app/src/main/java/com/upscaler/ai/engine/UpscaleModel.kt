@@ -16,12 +16,20 @@ enum class UpscaleModel(
     val downloadUrl: String? = null,
     val downloadSizeMb: Int = 0,
 ) {
+    NATURAL(
+        assetName = "realesr-general-natural-x4v3.onnx",
+        displayNameAr = "طبيعي (موصى به للفيديو)",
+        displayNameEn = "Natural (recommended for video)",
+        descriptionAr = "مزيج 50/50 من العام + إزالة التشويش: أنعم وأقرب للطبيعي، بدون مظهر بلاستيكي",
+        descriptionEn = "50/50 blend of General + Denoise: softer, film-like, no plastic look",
+        relativeCost = 1.0f,
+    ),
     GENERAL(
         assetName = "realesr-general-x4v3.onnx",
-        displayNameAr = "عام (سريع + جودة عالية)",
-        displayNameEn = "General (fast, high quality)",
-        descriptionAr = "مناسب لفيديوهات حقيقية: أفلام، يوتيوب 144p، تسجيلات قديمة",
-        descriptionEn = "Real footage: movies, 144p YouTube rips, old recordings",
+        displayNameAr = "عام حاد (أقصى تفاصيل)",
+        displayNameEn = "General sharp (max detail)",
+        descriptionAr = "أحدّ ما يمكن — ممتاز للنصوص والمباني، قد يبدو صناعياً على الوجوه",
+        descriptionEn = "Sharpest — great for text/buildings, can look artificial on faces",
         relativeCost = 1.0f,
     ),
     GENERAL_DENOISE(
@@ -54,7 +62,7 @@ enum class UpscaleModel(
     val isDownloadable get() = downloadUrl != null
 
     companion object {
-        fun fromName(n: String?): UpscaleModel = entries.firstOrNull { it.name == n } ?: GENERAL
+        fun fromName(n: String?): UpscaleModel = entries.firstOrNull { it.name == n } ?: NATURAL
     }
 }
 
