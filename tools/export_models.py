@@ -77,12 +77,18 @@ def export(name, fname, num_feat, num_conv):
     pth = os.path.join("weights", fname)
     download(BASE + fname, pth)
 
-    model = SRVGGNetCompact(num_feat=num_feat, num_conv=num_conv, upscale=4, act_type="prelu")
     state = torch.load(pth, map_location="cpu", weights_only=True)
     if "params" in state:
         state = state["params"]
     elif "params_ema" in state:
         state = state["params_ema"]
+    # Infer architecture from the checkpoint itself (robust to upstream naming changes)
+    num_feat = state["body.0.weight"].shape[0]
+    body_idx = sorted({int(k.split(".")[1]) for k in state if k.startswith("body.")})
+    last = max(body_idx)
+    num_conv = (last - 2) // 2          # body = conv,act, (conv,act)*num_conv, conv
+    print(f"  arch: num_feat={num_feat} num_conv={num_conv}")
+    model = SRVGGNetCompact(num_feat=num_feat, num_conv=num_conv, upscale=4, act_type="prelu")
     model.load_state_dict(state, strict=True)
     model.eval()
 
