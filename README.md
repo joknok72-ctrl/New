@@ -7,7 +7,9 @@
 
 ## 📱 تحميل التطبيق (Download APK)
 
-1. افتح صفحة **[Releases](../../releases/latest)** واضغط على ملف `VideoUpscalerAI-*.apk`
+**⬇️ أحدث نسخة: https://github.com/joknok72-ctrl/New/releases/latest**
+
+1. افتح الرابط أعلاه واضغط على ملف `VideoUpscalerAI-*.apk`
 2. سطّبه على موبايلك (Android 8.0 أو أحدث — يُفضّل موبايل من 2021+ بـ 6GB RAM أو أكثر)
 3. افتح التطبيق → اختر فيديو → اضغط **ابدأ التحسين**
 
@@ -31,6 +33,12 @@
 | 🔋 **Foreground service + wake lock** | Lock the screen, processing continues; progress in notification |
 | 🌍 **Arabic + English UI** | Follows system language, RTL supported |
 | 📤 **Share-to-app** | Share any video from Gallery / WhatsApp straight into the upscaler |
+
+## 🔗 Links
+
+- **Repository**: https://github.com/joknok72-ctrl/New
+- **Latest APK**: https://github.com/joknok72-ctrl/New/releases/latest
+- **CI builds**: https://github.com/joknok72-ctrl/New/actions
 
 ## 🏗️ Tech Stack
 

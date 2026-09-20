@@ -14,8 +14,9 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "1.0.0"
-        // ONNX Runtime ships arm64-v8a, armeabi-v7a, x86, x86_64. Keep 64-bit ARM (99% of modern phones) + emulator.
-        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
+        // ONNX Runtime ships arm64-v8a, armeabi-v7a, x86, x86_64.
+        // arm64-v8a only: every Android phone since ~2017. Dropping x86_64 (emulator) saves ~40 MB.
+        ndk { abiFilters += listOf("arm64-v8a") }
     }
 
     val ksPath = System.getenv("KEYSTORE_FILE")?.takeIf { it.isNotBlank() }
