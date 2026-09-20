@@ -22,7 +22,7 @@ def sh(cmd):
     print("$", cmd, flush=True); return subprocess.run(cmd, shell=True)
 
 # ── 1) deps ───────────────────────────────────────────────────────────────────────
-sh("pip install -q "gradio>=5.0" realesrgan basicsr facexlib gfpgan opencv-python-headless requests 2>&1 | tail -1")
+sh("pip install -q 'gradio>=5.0' realesrgan basicsr facexlib gfpgan opencv-python-headless requests 2>&1 | tail -1")
 for f in glob.glob("/usr/local/lib/python3*/dist-packages/basicsr/data/degradations.py") + glob.glob("/opt/conda/lib/python3*/site-packages/basicsr/data/degradations.py"):
     s = open(f).read().replace("from torchvision.transforms.functional_tensor import rgb_to_grayscale", "from torchvision.transforms.functional import rgb_to_grayscale")
     open(f, "w").write(s)
