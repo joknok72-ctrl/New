@@ -74,23 +74,34 @@ def infer_image(img: Image.Image, scale: int, model: str = "general"):
     return Image.fromarray(cv2.cvtColor(out, cv2.COLOR_BGR2RGB))
 
 
-def infer_video(path: str, scale: int, model: str = "general", progress=gr.Progress()):
-    """Frames are split across all GPUs and re-ordered before encoding. Duplicate frames reused."""
-    scale = int(scale)
+def infer_video(path: str, scale: int, model: str = "general", natural: float = 0.5, progress=gr.Progress()):
+    """Temporally-coherent upscale.
+    Fixes vs naive per-frame SR:
+      • duplicate detection is *relative to noise floor* and only fires on true repeats (diff < 0.05 on 32x32),
+        never on slow motion — so no stutter.
+      • motion-compensated temporal blend (optical flow, Farneback) of the previous *output*
+        into the current one → kills shimmer without ghosting.
+      • "natural" 0..1: blend the AI result with a bicubic upscale of the source in low-detail
+        regions and add back a little of the source's own grain, so faces/sky don't look plastic.
+    Frames are split across all GPUs, results re-ordered.
+    """
+    scale = int(scale); natural = float(natural)
     cap = cv2.VideoCapture(path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) * scale; h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) * scale
+    w0 = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)); h0 = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    w = w0 * scale; h = h0 * scale
     raw = tempfile.mktemp(suffix=".mp4"); final = tempfile.mktemp(suffix=".mp4")
     enc = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True).stdout
     codec = "h264_nvenc" if "h264_nvenc" in enc else "libx264"
     ff = subprocess.Popen(["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{w}x{h}", "-r", str(fps), "-i", "-",
-                           "-c:v", codec, "-preset", "p4" if codec == "h264_nvenc" else "fast", "-b:v", f"{int(w*h*fps*0.09/1000)}k", "-pix_fmt", "yuv420p", raw], stdin=subprocess.PIPE)
+                           "-c:v", codec, "-preset", "p5" if codec == "h264_nvenc" else "medium", "-b:v", f"{int(w*h*fps*0.10/1000)}k", "-pix_fmt", "yuv420p", raw], stdin=subprocess.PIPE)
     frames, dup_of, prev = [], [], None
     while True:
         ok, fr = cap.read()
         if not ok: break
         small = cv2.resize(fr, (32, 32), interpolation=cv2.INTER_AREA).astype(np.int16)
-        dup_of.append(len(frames) - 1 if (prev is not None and np.abs(small - prev).mean() < 1.2) else -1)
+        # true duplicate only: encoders produce *identical* repeats (diff ~0.0), real motion is >= ~0.1
+        dup_of.append(len(frames) - 1 if (prev is not None and np.abs(small - prev).mean() < 0.05) else -1)
         frames.append(fr); prev = small
     cap.release()
     total = len(frames); results = [None] * total
@@ -101,19 +112,61 @@ def infer_video(path: str, scale: int, model: str = "general", progress=gr.Progr
         up = UPS[g].get(model, UPS[g]["general"])
         for i in idxs:
             with LOCKS[g]:
-                results[i], _ = up.enhance(frames[i], outscale=scale)
+                out, _ = up.enhance(frames[i], outscale=scale)
+            results[i] = out
             done[0] += 1
-            if done[0] % 10 == 0: progress(done[0] / max(len(todo), 1), desc=f"{done[0]}/{len(todo)} on {len(UPS)} GPU(s)")
+            if done[0] % 10 == 0: progress(0.8 * done[0] / max(len(todo), 1), desc=f"AI {done[0]}/{len(todo)} on {len(UPS)} GPU(s)")
 
     ths = [threading.Thread(target=worker, args=(g, todo[g::len(UPS)])) for g in range(len(UPS))]
     for t in ths: t.start()
     for t in ths: t.join()
+
+    # ---- temporal pass (sequential, CPU) ------------------------------------------------------
+    prev_out = None; prev_src_small = None
     for i in range(total):
+        src = frames[i]
         if results[i] is None:
             j = dup_of[i]
             while results[j] is None and dup_of[j] >= 0: j = dup_of[j]
             results[i] = results[j]
-        ff.stdin.write(results[i].tobytes())
+        cur = results[i].astype(np.float32)
+
+        if natural > 0:
+            # (a) natural blend: bicubic upscale of the source as the "honest" baseline
+            bic = cv2.resize(src, (w, h), interpolation=cv2.INTER_CUBIC).astype(np.float32)
+            # detail mask from the *source* (where the source has real edges, trust the AI; where it is
+            # smooth — sky, skin, walls — the AI is hallucinating, so lean towards bicubic)
+            gsrc = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            gx = cv2.Sobel(gsrc, cv2.CV_32F, 1, 0); gy = cv2.Sobel(gsrc, cv2.CV_32F, 0, 1)
+            edge = cv2.GaussianBlur(np.sqrt(gx * gx + gy * gy), (0, 0), 1.5)
+            edge = np.clip(edge / 40.0, 0, 1)
+            edge = cv2.resize(edge, (w, h), interpolation=cv2.INTER_LINEAR)[..., None]
+            # ai weight: 1 on edges, (1-natural*0.7) on flat regions
+            wai = 1.0 - natural * 0.7 * (1.0 - edge)
+            cur = cur * wai + bic * (1.0 - wai)
+            # (b) give back a whisper of the source's own fine grain so it doesn't look airbrushed
+            grain = (bic - cv2.GaussianBlur(bic, (0, 0), 1.2)) * (0.35 * natural)
+            cur = cur + grain
+
+        # (c) motion-compensated temporal smoothing against previous OUTPUT
+        if prev_out is not None:
+            g0 = cv2.cvtColor(prev_src_small, cv2.COLOR_BGR2GRAY); g1 = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
+            flow = cv2.calcOpticalFlowFarneback(g0, g1, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+            # upscale flow to output size
+            flow_up = cv2.resize(flow, (w, h), interpolation=cv2.INTER_LINEAR) * scale
+            ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+            mapx = xs - flow_up[..., 0]; mapy = ys - flow_up[..., 1]
+            warped = cv2.remap(prev_out, mapx, mapy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+            # confidence: where warped prev matches current (low error) blend strongly; where it doesn't (occlusion/cut) don't
+            err = np.abs(warped - cur).mean(axis=2, keepdims=True)
+            alpha = np.clip(1.0 - err / 18.0, 0.0, 1.0) * 0.55  # max 55 % history
+            if err.mean() > 25: alpha[:] = 0  # scene cut
+            cur = cur * (1 - alpha) + warped * alpha
+
+        out8 = np.clip(cur, 0, 255).astype(np.uint8)
+        ff.stdin.write(out8.tobytes())
+        prev_out = cur; prev_src_small = src
+        if i % 10 == 0: progress(0.8 + 0.2 * i / max(total, 1), desc=f"temporal {i}/{total}")
     ff.stdin.close(); ff.wait()
     r = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", raw, "-i", path, "-c:v", "copy", "-c:a", "aac", "-map", "0:v:0", "-map", "1:a:0?", "-shortest", final])
     return final if r.returncode == 0 else raw
@@ -126,8 +179,9 @@ with gr.Blocks() as demo:
         ii = gr.Image(type="pil"); si = gr.Radio([2, 4, 8], value=4, type="value", label="scale"); mi = gr.Dropdown(MODELS, value="general", label="model"); oi = gr.Image(type="pil")
         gr.Button("Run").click(infer_image, [ii, si, mi], oi, api_name="image")
     with gr.Tab("Video"):
-        iv = gr.Video(); sv = gr.Radio([2, 4], value=4, type="value", label="scale"); mv = gr.Dropdown(MODELS, value="general", label="model"); ov = gr.Video()
-        gr.Button("Run").click(infer_video, [iv, sv, mv], ov, api_name="video")
+        iv = gr.Video(); sv = gr.Radio([2, 4], value=4, type="value", label="scale"); mv = gr.Dropdown(MODELS, value="general", label="model")
+        nv = gr.Slider(0, 1, value=0.5, step=0.05, label="natural (0 = raw AI, 1 = most natural)"); ov = gr.Video()
+        gr.Button("Run").click(infer_video, [iv, sv, mv, nv], ov, api_name="video")
 demo.queue(max_size=40, default_concurrency_limit=len(UPS) * 2)
 app, local_url, share_url = demo.launch(share=True, prevent_thread_lock=True, show_error=True)
 print("PUBLIC URL:", share_url, flush=True)

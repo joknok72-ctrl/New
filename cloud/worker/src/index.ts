@@ -25,6 +25,7 @@ export interface Env {
 
 /** args=3 → backend accepts (file, scale, model) like our Kaggle notebook; args=2 → (file, scale) like public HF spaces */
 type Backend = { host: string; fnImage: number; fnVideo: number; kind: "gradio"; args: 2 | 3; prefix?: string };
+/** Our Kaggle backend (args=3) also takes a 4th "natural" 0..1 arg on the video fn. */
 
 const prefixCache = new Map<string, string>();
 /** Gradio 5 serves the API under /gradio_api; Gradio 4 at root. Detect once per host. */
@@ -231,7 +232,7 @@ async function video(req: Request, env: Env, ctx: ExecutionContext) {
   const body = await req.arrayBuffer();
   if (body.byteLength > max) return json({ error: "video too large" }, 413);
 
-  const key = `video/${scale}/${url.searchParams.get("model") || "general"}/${await sha256(body)}.mp4`;
+  const key = `video/${scale}/${url.searchParams.get("model") || "general"}/n${url.searchParams.get("natural") ?? "0.5"}/${await sha256(body)}.mp4`;
   const { readable, writable } = new TransformStream();
   const w = writable.getWriter();
   const enc = new TextEncoder();
@@ -250,7 +251,11 @@ async function video(req: Request, env: Env, ctx: ExecutionContext) {
       // Gradio 5 Video component wants { video: FileData, subtitles: null }; Gradio 4 wants FileData
       const vin: any = (b.prefix ?? "") ? { video: fd, subtitles: null } : fd;
       const vargs: any[] = [vin, scale];
-      if (b.args === 3) vargs.push(url.searchParams.get("model") || "general");
+      if (b.args === 3) {
+        vargs.push(url.searchParams.get("model") || "general");
+        const nat = parseFloat(url.searchParams.get("natural") ?? "0.5");
+        vargs.push(isFinite(nat) ? Math.min(1, Math.max(0, nat)) : 0.5);
+      }
       const out = await gradioRun(b, b.fnVideo, vargs, (ev) => {
         if (ev.msg === "estimation") send({ stage: "queued", rank: ev.rank, eta: ev.rank_eta });
         else if (ev.msg === "process_starts") send({ stage: "processing", eta: ev.eta });

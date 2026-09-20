@@ -96,6 +96,8 @@ object S {
     val cloudOffline get() = t("GPU سحابي غير متاح الآن — هيشتغل على الجهاز", "Cloud GPU offline — will run on device")
     val cloudFrames get() = t("فريمات من السحابة", "cloud frames")
     val cloudNote get() = t("السحابة مجانية (HuggingFace ZeroGPU / Kaggle). لتسريع أكبر شغّل نوتبوك Kaggle من الريبو.", "Cloud is free (HuggingFace ZeroGPU / Kaggle). For max speed run the Kaggle notebook from the repo.")
+    val natural get() = t("مظهر طبيعي (ضد البلاستيك)", "Natural look (anti-plastic)")
+    val naturalHint get() = t("0 = AI خام وحاد جداً • 100 = أقرب للطبيعي مع حبيبات خفيفة", "0 = raw sharp AI • 100 = most natural with light grain")
     val howItWorks get() = t("كيف يعمل؟", "How it works")
     val howItWorksBody get() = t(
         "1) يفك الفيديو بالهاردوير\n2) شبكة Real-ESRGAN تكبّر كل فريم ×4 على GPU/NPU\n3) يتخطى الفريمات المكررة ويثبّت النتيجة زمنياً\n4) يعيد الترميز HEVC مع نسخ الصوت الأصلي بدون فقدان",

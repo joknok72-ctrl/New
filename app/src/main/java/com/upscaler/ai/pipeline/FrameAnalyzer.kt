@@ -16,8 +16,12 @@ import kotlin.math.abs
 class FrameAnalyzer {
     companion object {
         const val T = 32
-        /** Mean abs luma diff (0..255) below which frames are considered duplicates. */
-        const val DUP_THRESHOLD = 1.2f
+        /**
+         * Mean abs luma diff (0..255) on the 32x32 thumbnail below which frames are considered duplicates.
+         * Must only catch *encoder repeats* (identical frames, diff ≈ 0.0). Real slow motion at 144p is
+         * typically 0.1–0.3, so 1.2 wrongly froze whole videos → visible stutter. 0.05 is safe.
+         */
+        const val DUP_THRESHOLD = 0.05f
         /** Above this → scene cut. */
         const val CUT_THRESHOLD = 40f
     }

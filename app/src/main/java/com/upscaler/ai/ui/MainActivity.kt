@@ -466,6 +466,10 @@ private fun SettingsCard(s: Settings, vm: MainViewModel) {
             dl.error?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp) }
         }
 
+        Text("${S.natural}: ${(s.natural * 100).toInt()}%", color = TextSecondary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Slider(s.natural, { v -> vm.update { it.copy(natural = v) } }, valueRange = 0f..1f)
+        Text(S.naturalHint, color = TextSecondary, fontSize = 11.sp)
+
         Label(S.colorMode)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             ColorMode.entries.forEach { c ->

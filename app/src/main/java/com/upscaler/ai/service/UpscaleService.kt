@@ -85,6 +85,7 @@ class UpscaleService : Service() {
                 putExtra("endMs", job.endMs)
                 putExtra("color", job.colorMode.name)
                 putExtra("compute", job.compute.name)
+                putExtra("natural", job.natural)
             }
             if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i) else ctx.startService(i)
         }
@@ -140,6 +141,7 @@ class UpscaleService : Service() {
                     endMs = intent.getLongExtra("endMs", 0),
                     colorMode = ColorMode.fromName(intent.getStringExtra("color")),
                     compute = ComputeMode.fromName(intent.getStringExtra("compute")),
+                    natural = intent.getFloatExtra("natural", 0.5f),
                 )
                 items.add(QueuedJob(nextId++, job, intent.getStringExtra("name") ?: "video"))
                 publish()

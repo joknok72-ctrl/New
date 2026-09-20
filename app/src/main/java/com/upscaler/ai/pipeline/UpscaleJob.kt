@@ -21,6 +21,8 @@ data class UpscaleJob(
     val endMs: Long = 0,
     val colorMode: ColorMode = ColorMode.OFF,
     val compute: ComputeMode = ComputeMode.DEVICE,
+    /** 0..1 anti-plastic strength (blend toward source in flat regions + grain). */
+    val natural: Float = 0.5f,
 )
 
 sealed class UpscaleState {

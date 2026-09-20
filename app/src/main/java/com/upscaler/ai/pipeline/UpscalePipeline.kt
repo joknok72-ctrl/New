@@ -148,7 +148,8 @@ class UpscalePipeline(private val ctx: Context) {
             val eng: SuperResolutionEngine? = engine
 
             val analyzer = FrameAnalyzer()
-            val stabilizer = if (job.antiFlicker && useAi) TemporalStabilizer(aiW, aiH) else null
+            val stabilizer = if (job.antiFlicker && useAi) TemporalStabilizer(aiW, aiH).also { it.strength = 0.5f } else null
+            val natural = if (useAi && job.natural > 0.01f) NaturalBlend(aiW, aiH, srcW, srcH) else null
             val totalFrames = (effectiveDurMs / 1000f * info.fps).toLong().coerceAtLeast(1)
             val smartSkip = job.preset == QualityPreset.BALANCED
 
@@ -230,6 +231,7 @@ class UpscalePipeline(private val ctx: Context) {
                                         eng.upscale(f.pixels, srcW, srcH, out)
                                     }
                                 }
+                                if (passes == 1) natural?.apply(out, f.pixels, job.natural)
                                 if (stabilizer != null && passes == 1 && cloud == null) {
                                     stabilizer.apply(out, prevLow, f.pixels, srcW, srcH)
                                 }
@@ -270,6 +272,7 @@ class UpscalePipeline(private val ctx: Context) {
                                         Log.w(TAG, "cloud frame failed, device fallback: ${e.message}")
                                         engLock.withLock { eng.upscale(src, srcW, srcH, out) }
                                     }
+                                    natural?.apply(out, src, job.natural)
                                     emit(idx, Triple(out, pts, false))
                                 }
                             } finally { workerFinished() }
@@ -317,6 +320,7 @@ class UpscalePipeline(private val ctx: Context) {
             dec.close(); decoder = null
             eng?.close(); engine = null
             stabilizer?.close()
+            natural?.close()
 
             _state.value = UpscaleState.Preparing("Saving to gallery…")
             val outFile: File = tmpOut
@@ -358,7 +362,7 @@ class UpscalePipeline(private val ctx: Context) {
             // choose 2x or 4x based on target
             val need = if (job.target == TargetResolution.AUTO) 4f else job.target.height.toFloat() / minOf(info.displayWidth, info.displayHeight)
             val scale = if (need <= 2.2f) 2 else 4
-            out = cloud.video(tmpIn, scale, job.model) { ev ->
+            out = cloud.video(tmpIn, scale, job.model, job.natural) { ev ->
                 when (ev) {
                     is CloudEngine.VideoEvent.Progress -> _state.value = UpscaleState.Preparing("Cloud GPU: ${ev.stage}${ev.detail?.let { " • $it" } ?: ""}")
                     is CloudEngine.VideoEvent.Done -> _state.value = UpscaleState.Preparing("Downloading result…")

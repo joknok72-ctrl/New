@@ -40,18 +40,19 @@ data class Settings(
     val color: ColorMode = ColorMode.OFF,
     val autoModel: Boolean = true,
     val compute: ComputeMode = ComputeMode.DEVICE,
+    val natural: Float = 0.5f,
 ) {
     fun toJson() = JSONObject().apply {
         put("model", model.name); put("preset", preset.name); put("target", target.name)
         put("sharpen", sharpen.toDouble()); put("antiFlicker", antiFlicker); put("hevc", hevc); put("gpu", gpu)
-        put("color", color.name); put("autoModel", autoModel); put("compute", compute.name)
+        put("color", color.name); put("autoModel", autoModel); put("compute", compute.name); put("natural", natural.toDouble())
     }
     companion object {
         fun fromJson(o: JSONObject) = Settings(
             UpscaleModel.fromName(o.optString("model")), QualityPreset.fromName(o.optString("preset")),
             TargetResolution.fromName(o.optString("target")), o.optDouble("sharpen", 0.3).toFloat(),
             o.optBoolean("antiFlicker", true), o.optBoolean("hevc", true), o.optBoolean("gpu", true),
-            ColorMode.fromName(o.optString("color")), o.optBoolean("autoModel", true), ComputeMode.fromName(o.optString("compute")))
+            ColorMode.fromName(o.optString("color")), o.optBoolean("autoModel", true), ComputeMode.fromName(o.optString("compute")), o.optDouble("natural", 0.5).toFloat())
     }
 }
 
@@ -258,7 +259,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val s = _settings.value
         _sources.value.forEachIndexed { idx, src ->
             val (a, b) = if (idx == 0) _trim.value else 0L to 0L
-            UpscaleService.enqueue(ctx, UpscaleJob(src.uri, s.model, s.preset, s.target, s.sharpen, s.antiFlicker, s.hevc, s.gpu, a, b, s.color, s.compute),
+            UpscaleService.enqueue(ctx, UpscaleJob(src.uri, s.model, s.preset, s.target, s.sharpen, s.antiFlicker, s.hevc, s.gpu, a, b, s.color, s.compute, s.natural),
                 src.info?.displayName ?: "video")
         }
     }
@@ -270,7 +271,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val start = _trim.value.first
         val info = src.info
         val end = minOf(start + 10_000, info?.durationMs ?: (start + 10_000))
-        UpscaleService.enqueue(ctx, UpscaleJob(src.uri, s.model, s.preset, s.target, s.sharpen, s.antiFlicker, s.hevc, s.gpu, start, end, s.color, s.compute),
+        UpscaleService.enqueue(ctx, UpscaleJob(src.uri, s.model, s.preset, s.target, s.sharpen, s.antiFlicker, s.hevc, s.gpu, start, end, s.color, s.compute, s.natural),
             "TEST 10s • " + (info?.displayName ?: "video"))
     }
 

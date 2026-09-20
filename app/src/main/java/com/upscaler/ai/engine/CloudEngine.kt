@@ -108,8 +108,8 @@ class CloudEngine(private val baseUrl: String = DEFAULT_URL) {
      * Upload an MP4 and get the upscaled MP4 back. Streams SSE progress events.
      * @param scale 2 or 4
      */
-    suspend fun video(file: File, scale: Int, model: UpscaleModel, onEvent: (VideoEvent) -> Unit): File? = withContext(Dispatchers.IO) {
-        val c = (URL("$baseUrl/video?scale=$scale&model=${modelParam(model)}").openConnection() as HttpURLConnection).apply {
+    suspend fun video(file: File, scale: Int, model: UpscaleModel, natural: Float, onEvent: (VideoEvent) -> Unit): File? = withContext(Dispatchers.IO) {
+        val c = (URL("$baseUrl/video?scale=$scale&model=${modelParam(model)}&natural=${"%.2f".format(java.util.Locale.US, natural)}").openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"; doOutput = true
             connectTimeout = 15_000; readTimeout = 0 // SSE — no read timeout
             setRequestProperty("Content-Type", "video/mp4")
