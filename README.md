@@ -21,7 +21,7 @@
 
 | | |
 |---|---|
-| 🧠 **Real-ESRGAN AI** | 3 bundled models (general / denoise / anime), x4 per pass, x16 in ULTRA mode |
+| 🧠 **Real-ESRGAN AI** | 3 bundled models (general / denoise / anime) + downloadable Ultra+, x4 per pass, x16 in ULTRA mode |
 | ⚡ **GPU / NPU acceleration** | ONNX Runtime + NNAPI (fp16). Auto-fallback to XNNPACK CPU |
 | 🔁 **Smart duplicate-frame skipping** | Web video at 144p often repeats frames — we reuse the previous AI output (typ. 20–40 % time saved) |
 | 🎞️ **Temporal anti-flicker** | Motion-adaptive blending kills the "shimmer" typical of single-image SR |
@@ -41,6 +41,12 @@
 | 🕓 **History** *(v1.1)* | All previous outputs with open / share |
 | 💾 **Settings persist** *(v1.1)* | Your last preset / model / target are remembered |
 | 🌡️ **Thermal guard** *(v1.1)* | Auto-pauses when Android reports the phone is overheating |
+| 💎 **Ultra+ model** *(v1.2)* | Full RealESRGAN_x4plus (RRDBNet, 16.7 M params) for faces & fine detail — 64 MB on-demand download |
+| 🔍 **Auto content detection** *(v1.2)* | Detects anime / real / heavily-compressed → picks the right model automatically |
+| 🎨 **GPU colour grading** *(v1.2)* | Auto / Vivid contrast + saturation for washed-out sources (suggested automatically when needed) |
+| ⏯️ **Pause / resume** *(v1.2)* | From the app or the notification; paused time excluded from ETA |
+| ↔️ **Compare slider** *(v1.2)* | Drag a divider over the preview to compare before/after pixel-for-pixel |
+| 🔏 **Release-signed** *(v1.2)* | Stable signature → updates install over the previous version |
 
 ## 🔗 Links
 
@@ -82,10 +88,9 @@ tools/export_models.py   PyTorch → ONNX export (runs in CI, models cached)
 .github/workflows/build.yml
 ```
 
-## 🔐 Release signing (optional)
+## 🔐 Release signing
 
-By default CI signs with the debug key (installable, but updates need uninstall). For a stable signature add these repository **Secrets**:
-`KEYSTORE_BASE64` (`base64 -w0 release.jks`), `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`.
+CI signs with a release keystore stored in repository **Secrets** (`KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`). Keep a backup of the keystore — losing it means users must uninstall before updating.
 
 ## 🛠️ Build locally
 
@@ -100,7 +105,8 @@ pip install torch onnx onnxruntime && python tools/export_models.py
 - [x] Before/after preview + device benchmark — v1.1
 - [x] Trim / quick test — v1.1
 - [ ] Optional cloud GPU mode for 10× faster processing (paid API)
-- [ ] Face-enhancement pass (GFPGAN) for talking-head videos
+- [x] Ultra+ full RRDBNet model for faces / fine detail — v1.2
+- [x] Auto content detection + colour grading + pause/resume — v1.2
 - [ ] Frame interpolation (RIFE) 15 fps → 60 fps
 - [ ] Video comparison scrubber on the finished output
 
