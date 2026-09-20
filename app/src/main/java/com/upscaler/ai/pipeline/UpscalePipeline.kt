@@ -17,7 +17,6 @@ import com.upscaler.ai.video.FrameDecoder
 import com.upscaler.ai.video.GlFrameRenderer
 import com.upscaler.ai.video.VideoEncoder
 import com.upscaler.ai.video.VideoInfo
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
@@ -58,7 +57,7 @@ class UpscalePipeline(private val ctx: Context) {
     private val _state = MutableStateFlow<UpscaleState>(UpscaleState.Idle)
     val state: StateFlow<UpscaleState> = _state
 
-    suspend fun run(job: UpscaleJob) = withContext(Dispatchers.Default) {
+    suspend fun run(job: UpscaleJob): Unit = withContext(Dispatchers.Default) {
         val t0 = SystemClock.elapsedRealtime()
         var engine: SuperResolutionEngine? = null
         var decoder: FrameDecoder? = null
@@ -73,22 +72,27 @@ class UpscalePipeline(private val ctx: Context) {
 
             val profile = DeviceProfiler.profile(ctx)
             val useAi = job.preset != QualityPreset.FAST
-            val passes = if (job.preset == QualityPreset.ULTRA) 2 else 1
-            val aiScale = if (useAi) (SuperResolutionEngine.SCALE.let { s -> if (passes == 2) s * s else s }) else 1
-
-            // ---- Output resolution ------------------------------------------------------
             val srcW = info.width
             val srcH = info.height
+            // ULTRA = 2 chained passes (x16) but only when the result stays within 4K
+            val passes = if (job.preset == QualityPreset.ULTRA && srcW * 16 <= 4096 && srcH * 16 <= 4096) 2 else 1
+            val aiScale = if (useAi) (if (passes == 2) 16 else SuperResolutionEngine.SCALE) else 1
+
+            // ---- Output resolution ------------------------------------------------------
             val aiW = srcW * aiScale
             val aiH = srcH * aiScale
-            var (outW, outH) = computeOutput(info, aiW, aiH, job.target)
+            val nominalW = if (useAi) aiW else srcW * 4
+            val nominalH = if (useAi) aiH else srcH * 4
+            var (outW, outH) = computeOutput(info, nominalW, nominalH, job.target)
             // Encoder needs even dims, and we cap at 4K (encoder limits)
             outW = (outW / 2) * 2; outH = (outH / 2) * 2
             if (maxOf(outW, outH) > 4096) {
                 val s = 4096f / maxOf(outW, outH)
                 outW = ((outW * s).roundToInt() / 2) * 2; outH = ((outH * s).roundToInt() / 2) * 2
             }
-            val (encW, encH) = if (info.rotation == 90 || info.rotation == 270) outH to outW else outW to outH
+            // Encode in coded orientation; rotation is carried as MP4 metadata (like the source).
+            val encW = outW
+            val encH = outH
             Log.i(TAG, "AI ${aiW}x$aiH → encode ${encW}x$encH (rot ${info.rotation})")
 
             // ---- Engines -----------------------------------------------------------------
@@ -102,7 +106,7 @@ class UpscalePipeline(private val ctx: Context) {
             val outName = buildOutName(info, encW, encH)
             tmpOut = File(ctx.cacheDir, "out_${System.currentTimeMillis()}.mp4")
             encoder = VideoEncoder(ctx, tmpOut.absolutePath, encW, encH, info.fps, job.inputUri,
-                copyAudio = info.hasAudio, preferHevc = job.preferHevc)
+                copyAudio = info.hasAudio, preferHevc = job.preferHevc, rotationHint = info.rotation)
 
             // ---- Renderer (owns EGL on its own thread) ------------------------------------
             val encSurface = encoder.inputSurface
@@ -190,7 +194,7 @@ class UpscalePipeline(private val ctx: Context) {
                     while (isActive) {
                         val item = upscaledQ.receive() ?: break
                         val (pix, ptsUs, _) = item
-                        r.draw(pix, aiW, aiH, info.rotation, ptsUs * 1000)
+                        r.draw(pix, aiW, aiH, 0, ptsUs * 1000)
                         enc.drain(false)
                         upscaledPool.send(pix)
                         processed++

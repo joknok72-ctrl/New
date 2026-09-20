@@ -25,6 +25,7 @@ class VideoEncoder(
     private val sourceUri: Uri,
     copyAudio: Boolean,
     preferHevc: Boolean = true,
+    rotationHint: Int = 0,
 ) : AutoCloseable {
     companion object {
         private const val TAG = "VideoEncoder"
@@ -74,10 +75,11 @@ class VideoEncoder(
         val fmt = MediaFormat.createVideoFormat(mime, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
-            setFloat(MediaFormat.KEY_FRAME_RATE, fps)
+            setInteger(MediaFormat.KEY_FRAME_RATE, fps.toInt().coerceIn(1, 120))
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
         }
+        if (rotationHint != 0) muxer.setOrientationHint(rotationHint)
         codec = MediaCodec.createEncoderByType(mime)
         codec.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         inputSurface = codec.createInputSurface()

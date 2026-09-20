@@ -191,8 +191,22 @@ class SuperResolutionEngine(
     private val outTensor: OnnxTensor by lazy { OnnxTensor.createTensor(env, outBuf, outShape) }
     private val inTensor: OnnxTensor by lazy { OnnxTensor.createTensor(env, inBuf, inShape) }
 
+    private var pinnedOk = true
+
     private fun runTile() {
-        session.run(mapOf(inputName to inTensor), mapOf(outputName to outTensor)).close()
+        if (pinnedOk) {
+            try {
+                session.run(mapOf(inputName to inTensor), mapOf(outputName to outTensor)).close()
+                return
+            } catch (t: Throwable) {
+                Log.w(TAG, "pinned output unsupported, falling back to copy: ${t.message}")
+                pinnedOk = false
+            }
+        }
+        session.run(mapOf(inputName to inTensor)).use { r ->
+            val src = (r[0] as OnnxTensor).floatBuffer
+            outBuf.rewind(); outBuf.put(src); outBuf.rewind()
+        }
     }
 
     private fun writeBack(dst: IntArray, ow: Int, tx: Int, ty: Int, vx0: Int, vy0: Int, vx1: Int, vy1: Int) {

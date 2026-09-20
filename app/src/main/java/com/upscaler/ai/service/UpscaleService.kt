@@ -114,8 +114,6 @@ class UpscaleService : Service() {
     private fun startInForeground(n: Notification) {
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING)
-        } else if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MANIFEST)
         } else startForeground(NOTIF_ID, n)
     }
 
