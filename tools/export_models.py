@@ -105,7 +105,7 @@ def export(name, fname, num_feat, num_conv):
         import onnx
         from onnxsim import simplify
         m = onnx.load(out_path)
-        m_simp, ok = simplify(m, overwrite_input_shapes={"input": [1, 3, 64, 64]}, dynamic_input_shape=True)
+        m_simp, ok = simplify(m)  # keep dynamic H/W
         if ok:
             onnx.save(m_simp, out_path)
             print("  simplified OK")
