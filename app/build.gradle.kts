@@ -18,10 +18,13 @@ android {
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 
+    val ksPath = System.getenv("KEYSTORE_FILE")?.takeIf { it.isNotBlank() }
+    val hasReleaseKey = ksPath != null && file(ksPath).exists()
+
     signingConfigs {
         create("release") {
-            val ksFile = System.getenv("KEYSTORE_FILE")
-            if (ksFile != null && file(ksFile).exists()) {
+            if (hasReleaseKey) {
+                val ksFile = ksPath!!
                 storeFile = file(ksFile)
                 storePassword = System.getenv("KEYSTORE_PASSWORD")
                 keyAlias = System.getenv("KEY_ALIAS")
@@ -35,8 +38,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            val ksFile = System.getenv("KEYSTORE_FILE")
-            signingConfig = if (ksFile != null && file(ksFile).exists()) signingConfigs.getByName("release")
+            signingConfig = if (hasReleaseKey) signingConfigs.getByName("release")
                             else signingConfigs.getByName("debug")
         }
         debug {
