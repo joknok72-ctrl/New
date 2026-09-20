@@ -15,6 +15,7 @@ import androidx.core.app.NotificationManagerCompat
 import com.upscaler.ai.R
 import com.upscaler.ai.UpscalerApp
 import com.upscaler.ai.engine.ColorMode
+import com.upscaler.ai.engine.ComputeMode
 import com.upscaler.ai.engine.QualityPreset
 import com.upscaler.ai.engine.TargetResolution
 import com.upscaler.ai.engine.UpscaleModel
@@ -83,6 +84,7 @@ class UpscaleService : Service() {
                 putExtra("startMs", job.startMs)
                 putExtra("endMs", job.endMs)
                 putExtra("color", job.colorMode.name)
+                putExtra("compute", job.compute.name)
             }
             if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i) else ctx.startService(i)
         }
@@ -137,6 +139,7 @@ class UpscaleService : Service() {
                     startMs = intent.getLongExtra("startMs", 0),
                     endMs = intent.getLongExtra("endMs", 0),
                     colorMode = ColorMode.fromName(intent.getStringExtra("color")),
+                    compute = ComputeMode.fromName(intent.getStringExtra("compute")),
                 )
                 items.add(QueuedJob(nextId++, job, intent.getStringExtra("name") ?: "video"))
                 publish()

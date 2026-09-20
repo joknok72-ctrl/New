@@ -55,6 +55,9 @@ import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntSize
 import com.upscaler.ai.engine.ColorMode
+import com.upscaler.ai.engine.ComputeMode
+import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.CloudOff
 import com.upscaler.ai.engine.ContentAnalyzer
 import com.upscaler.ai.engine.UpscaleModel
 import androidx.compose.material.icons.filled.Bolt
@@ -409,7 +412,22 @@ private fun HistoryCard(items: List<Prefs.HistoryItem>, onOpen: (Uri) -> Unit, o
 @Composable
 private fun SettingsCard(s: Settings, vm: MainViewModel) {
     var adv by remember { mutableStateOf(false) }
+    val cloud by vm.cloud.collectAsState()
     SectionCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Label(S.compute); Spacer(Modifier.weight(1f))
+            val up = cloud?.ok == true
+            Icon(if (up) Icons.Default.Cloud else Icons.Default.CloudOff, null, tint = if (up) Green else TextSecondary, modifier = Modifier.size(16.dp).clickable { vm.refreshCloud() })
+            Spacer(Modifier.width(4.dp))
+            Text(if (up) (cloud?.gpu ?: S.cloudOnline) else S.cloudOffline, color = if (up) Green else TextSecondary, fontSize = 11.sp, maxLines = 1)
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            ComputeMode.entries.forEach { m ->
+                Chip(if (S.ar) m.labelAr else m.labelEn, s.compute == m, Modifier.weight(1f)) { vm.update { it.copy(compute = m) } }
+            }
+        }
+        Text((if (S.ar) s.compute.descAr else s.compute.descEn) + if (s.compute != ComputeMode.DEVICE) "\n" + S.cloudNote else "", color = TextSecondary, fontSize = 11.sp)
+
         Label(S.preset)
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             QualityPreset.entries.forEach { p ->
@@ -513,6 +531,7 @@ private fun ProgressCard(st: UpscaleState, onCancel: () -> Unit, onPause: () -> 
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Stat(S.engine, st.provider.uppercase()); Stat(S.skipped, "${st.skipped}")
+                    if (st.cloudFrames > 0) Stat(S.cloudFrames, "${st.cloudFrames}")
                 }
                 if (st.paused) Text("⏸ " + S.pausedLabel, color = Amber, fontWeight = FontWeight.Bold)
                 else Text(S.screenOffOk, color = TextSecondary, fontSize = 12.sp)

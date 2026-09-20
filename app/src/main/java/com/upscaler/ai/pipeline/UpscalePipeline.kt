@@ -8,6 +8,8 @@ import android.os.Environment
 import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
+import com.upscaler.ai.engine.CloudEngine
+import com.upscaler.ai.engine.ComputeMode
 import com.upscaler.ai.engine.DeviceProfiler
 import com.upscaler.ai.engine.ModelStore
 import com.upscaler.ai.engine.QualityPreset
@@ -28,6 +30,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileInputStream
@@ -81,6 +85,11 @@ class UpscalePipeline(private val ctx: Context) {
             val info = VideoInfo.probe(ctx, job.inputUri)
             require(info.width > 0 && info.height > 0) { "Could not read video dimensions" }
             Log.i(TAG, "Input: $info")
+
+            if (job.compute == ComputeMode.CLOUD && job.preset != QualityPreset.FAST) {
+                runCloudOnly(job, info, t0)
+                return@withContext
+            }
 
             val profile = DeviceProfiler.profile(ctx)
 
@@ -143,12 +152,19 @@ class UpscalePipeline(private val ctx: Context) {
             val totalFrames = (effectiveDurMs / 1000f * info.fps).toLong().coerceAtLeast(1)
             val smartSkip = job.preset == QualityPreset.BALANCED
 
+            val cloud: CloudEngine? = if (job.compute == ComputeMode.HYBRID && useAi && passes == 1) CloudEngine() else null
+            val cloudFrames = java.util.concurrent.atomic.AtomicLong(0)
+            val cloudOk = cloud?.let { c -> runCatching { c.health().ok }.getOrDefault(false) } ?: false
+            if (cloud != null) Log.i(TAG, "hybrid: cloud ${if (cloudOk) "available" else "unavailable → device only"}")
+
             // Frame pools (reuse memory)
             val decodedPool = Channel<DecodedFrame>(QUEUE + 1)
             repeat(QUEUE + 1) { decodedPool.trySend(DecodedFrame(srcW, srcH)) }
-            val decodedQ = Channel<DecodedFrame?>(QUEUE)
-            val upscaledPool = Channel<IntArray>(QUEUE + 1)
-            repeat(QUEUE + 1) { upscaledPool.trySend(IntArray(aiW * aiH)) }
+            val decodedQ = Channel<DecodedFrame?>(QUEUE + 4) // room for EOF pills
+            val nWorkers = 1 + (if (cloud != null && cloudOk) 3 else 0)
+            val poolSize = QUEUE + 1 + (nWorkers - 1) * 2
+            val upscaledPool = Channel<IntArray>(poolSize)
+            repeat(poolSize) { upscaledPool.trySend(IntArray(aiW * aiH)) }
             val upscaledQ = Channel<Triple<IntArray, Long, Boolean>?>(QUEUE) // (pixels, ptsUs, isLast)
 
             var processed = 0L
@@ -168,7 +184,25 @@ class UpscalePipeline(private val ctx: Context) {
                 }
 
                 val thermal = ThermalGuard(ctx)
-                // Stage 2: AI
+                // Stage 2: AI — device worker + (optional) cloud workers pulling from the same queue.
+                // Order is restored with a reorder buffer keyed by frame index.
+                val reorder = HashMap<Long, Triple<IntArray, Long, Boolean>>()
+                val reorderLock = Mutex()
+                var nextToEmit = 0L
+                suspend fun emit(idx: Long, item: Triple<IntArray, Long, Boolean>) {
+                    reorderLock.withLock {
+                        reorder[idx] = item
+                        while (true) {
+                            val n = reorder.remove(nextToEmit) ?: break
+                            upscaledQ.send(n); nextToEmit++
+                        }
+                    }
+                }
+                val producersDone = java.util.concurrent.atomic.AtomicInteger(0)
+                suspend fun workerFinished() { if (producersDone.incrementAndGet() == nWorkers) upscaledQ.send(null) }
+                val engLock = Mutex() // SuperResolutionEngine is single-threaded
+
+                // device worker (also handles duplicate skipping + temporal stabilizer)
                 launch(Dispatchers.Default) {
                     var prevLow: IntArray? = null
                     val prevLowBuf = IntArray(srcW * srcH)
@@ -176,7 +210,8 @@ class UpscalePipeline(private val ctx: Context) {
                     val mid = if (passes == 2) IntArray(srcW * 4 * srcH * 4) else null
                     try {
                         while (isActive) {
-                            val f = decodedQ.receive() ?: break
+                            val f = decodedQ.receive()
+                            if (f == null) { decodedQ.send(null); break } // propagate EOF to other workers
                             val out = upscaledPool.receive()
                             thermal.cooldownIfNeeded()
                             awaitResume()
@@ -187,28 +222,59 @@ class UpscalePipeline(private val ctx: Context) {
                                 System.arraycopy(lastOut, 0, out, 0, out.size)
                                 skipped++
                             } else if (eng != null) {
-                                if (passes == 2 && mid != null) {
-                                    eng.upscale(f.pixels, srcW, srcH, mid)
-                                    eng.upscale(mid, srcW * 4, srcH * 4, out)
-                                } else {
-                                    eng.upscale(f.pixels, srcW, srcH, out)
+                                engLock.withLock {
+                                    if (passes == 2 && mid != null) {
+                                        eng.upscale(f.pixels, srcW, srcH, mid)
+                                        eng.upscale(mid, srcW * 4, srcH * 4, out)
+                                    } else {
+                                        eng.upscale(f.pixels, srcW, srcH, out)
+                                    }
                                 }
-                                if (stabilizer != null && passes == 1) {
+                                if (stabilizer != null && passes == 1 && cloud == null) {
                                     stabilizer.apply(out, prevLow, f.pixels, srcW, srcH)
                                 }
                             } else {
-                                // FAST: no AI, pass through; GPU does the scaling
                                 System.arraycopy(f.pixels, 0, out, 0, out.size)
                             }
-                            // remember low-res prev for motion mask
                             System.arraycopy(f.pixels, 0, prevLowBuf, 0, prevLowBuf.size)
                             prevLow = prevLowBuf
                             lastOut = out
-                            val pts = f.ptsUs
+                            val pts = f.ptsUs; val idx = f.index
                             decodedPool.send(f)
-                            upscaledQ.send(Triple(out, pts, false))
+                            emit(idx, Triple(out, pts, false))
                         }
-                    } finally { upscaledQ.send(null) }
+                    } finally { workerFinished() }
+                }
+
+                // cloud workers (hybrid only). Each takes a frame, sends it to the free GPU, and
+                // falls back to the device engine if the cloud errors (device-side copy of the engine
+                // is NOT thread-safe → we route fallbacks through a mutex).
+                if (cloud != null && cloudOk && eng != null) {
+                    repeat(nWorkers - 1) {
+                        launch(Dispatchers.IO) {
+                            try {
+                                while (isActive) {
+                                    // back-pressure: don't grab frames while cloud is slow & congested
+                                    if (cloud.failures >= 3) break
+                                    val f = decodedQ.receive()
+                                    if (f == null) { decodedQ.send(null); break }
+                                    val out = upscaledPool.receive()
+                                    awaitResume()
+                                    val pts = f.ptsUs; val idx = f.index
+                                    val src = f.pixels.copyOf()
+                                    decodedPool.send(f)
+                                    try {
+                                        cloud.frame(src, srcW, srcH, job.model, out)
+                                        cloudFrames.incrementAndGet()
+                                    } catch (e: Exception) {
+                                        Log.w(TAG, "cloud frame failed, device fallback: ${e.message}")
+                                        engLock.withLock { eng.upscale(src, srcW, srcH, out) }
+                                    }
+                                    emit(idx, Triple(out, pts, false))
+                                }
+                            } finally { workerFinished() }
+                        }
+                    }
                 }
 
                 // Stage 3: render + encode (single thread owns EGL context)
@@ -235,7 +301,7 @@ class UpscalePipeline(private val ctx: Context) {
                                 frame = processed, totalFrames = totalFrames,
                                 progress = (processed.toFloat() / totalFrames).coerceIn(0f, 0.999f),
                                 fps = fps, etaSeconds = (remaining / fps.coerceAtLeast(0.01f)).toLong(),
-                                skipped = skipped, provider = provider, paused = paused.value,
+                                skipped = skipped, provider = if (cloud != null && cloudOk) "$provider+cloud" else provider, paused = paused.value, cloudFrames = cloudFrames.get(),
                                 inputRes = "${info.displayWidth}×${info.displayHeight}",
                                 outputRes = "${outW}×$outH", elapsedSeconds = el.toLong(),
                             )
@@ -273,6 +339,74 @@ class UpscalePipeline(private val ctx: Context) {
             try { engine?.close() } catch (_: Throwable) {}
             tmpOut?.let { if (it.exists()) it.delete() }
         }
+    }
+
+    /** CLOUD mode: (trim →) upload the clip to the free GPU via the Worker, download, save. */
+    private suspend fun runCloudOnly(job: UpscaleJob, info: VideoInfo, t0: Long) {
+        val cloud = CloudEngine()
+        _state.value = UpscaleState.Preparing("Checking cloud GPU…")
+        val h = cloud.health()
+        if (!h.ok) { _state.value = UpscaleState.Failed("Cloud GPU unavailable — switch to Hybrid or Device"); return }
+        _state.value = UpscaleState.Preparing("Preparing upload (${h.gpu ?: "GPU"})…")
+        val tmpIn = File(ctx.cacheDir, "cloud_in_${System.currentTimeMillis()}.mp4")
+        var out: File? = null
+        try {
+            val startUs = job.startMs.coerceAtLeast(0) * 1000
+            val endUs = if (job.endMs > 0 && job.endMs * 1000 > startUs) job.endMs * 1000 else Long.MAX_VALUE
+            remuxRange(job.inputUri, tmpIn, startUs, endUs)
+            if (tmpIn.length() > 60_000_000L) { _state.value = UpscaleState.Failed("Clip too large for cloud (max 60 MB). Trim it or use Hybrid."); return }
+            // choose 2x or 4x based on target
+            val need = if (job.target == TargetResolution.AUTO) 4f else job.target.height.toFloat() / minOf(info.displayWidth, info.displayHeight)
+            val scale = if (need <= 2.2f) 2 else 4
+            out = cloud.video(tmpIn, scale, job.model) { ev ->
+                when (ev) {
+                    is CloudEngine.VideoEvent.Progress -> _state.value = UpscaleState.Preparing("Cloud GPU: ${ev.stage}${ev.detail?.let { " • $it" } ?: ""}")
+                    is CloudEngine.VideoEvent.Done -> _state.value = UpscaleState.Preparing("Downloading result…")
+                    is CloudEngine.VideoEvent.Error -> Log.w(TAG, "cloud: ${ev.message}")
+                }
+            }
+            val f = out ?: run { _state.value = UpscaleState.Failed("Cloud processing failed — try Hybrid mode"); return }
+            _state.value = UpscaleState.Preparing("Saving to gallery…")
+            val outW = info.displayWidth * scale; val outH = info.displayHeight * scale
+            val name = buildOutName(info, outW, outH).replace("_AI_", "_CLOUD_")
+            val uri = saveToGallery(f, name)
+            val el = (SystemClock.elapsedRealtime() - t0) / 1000
+            _state.value = UpscaleState.Done(job.inputUri, uri, name, el, info.frameCountEstimate, 0, "${outW}×$outH", f.length())
+        } finally {
+            tmpIn.delete(); out?.delete()
+        }
+    }
+
+    /** Copies all tracks of [uri] between startUs..endUs into [dst] without re-encoding. */
+    private fun remuxRange(uri: Uri, dst: File, startUs: Long, endUs: Long) {
+        val ex = android.media.MediaExtractor()
+        ex.setDataSource(ctx, uri, null)
+        val muxer = android.media.MediaMuxer(dst.absolutePath, android.media.MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        val map = HashMap<Int, Int>()
+        for (i in 0 until ex.trackCount) {
+            val f = ex.getTrackFormat(i)
+            val m = f.getString(android.media.MediaFormat.KEY_MIME) ?: continue
+            if (m.startsWith("video/") || m.startsWith("audio/")) { map[i] = muxer.addTrack(f); ex.selectTrack(i) }
+        }
+        if (startUs > 0) ex.seekTo(startUs, android.media.MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+        muxer.start()
+        val buf = java.nio.ByteBuffer.allocate(2 shl 20)
+        val bi = android.media.MediaCodec.BufferInfo()
+        val base = if (startUs > 0) ex.sampleTime.coerceAtLeast(0) else 0L
+        while (true) {
+            val n = ex.readSampleData(buf, 0); if (n < 0) break
+            val t = ex.sampleTime
+            if (t > endUs) break
+            val trk = map[ex.sampleTrackIndex]
+            if (trk != null) {
+                bi.offset = 0; bi.size = n; bi.presentationTimeUs = (t - base).coerceAtLeast(0)
+                bi.flags = if (ex.sampleFlags and android.media.MediaExtractor.SAMPLE_FLAG_SYNC != 0) android.media.MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
+                muxer.writeSampleData(trk, buf, bi)
+            }
+            ex.advance()
+        }
+        try { muxer.stop() } catch (_: Throwable) {}
+        muxer.release(); ex.release()
     }
 
     private fun computeOutput(info: VideoInfo, aiW: Int, aiH: Int, target: TargetResolution): Pair<Int, Int> {

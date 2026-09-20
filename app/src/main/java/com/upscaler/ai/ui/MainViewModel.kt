@@ -6,7 +6,9 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.upscaler.ai.engine.CloudEngine
 import com.upscaler.ai.engine.ColorMode
+import com.upscaler.ai.engine.ComputeMode
 import com.upscaler.ai.engine.ContentAnalyzer
 import com.upscaler.ai.engine.DeviceProfiler
 import com.upscaler.ai.engine.ModelStore
@@ -37,18 +39,19 @@ data class Settings(
     val gpu: Boolean = true,
     val color: ColorMode = ColorMode.OFF,
     val autoModel: Boolean = true,
+    val compute: ComputeMode = ComputeMode.DEVICE,
 ) {
     fun toJson() = JSONObject().apply {
         put("model", model.name); put("preset", preset.name); put("target", target.name)
         put("sharpen", sharpen.toDouble()); put("antiFlicker", antiFlicker); put("hevc", hevc); put("gpu", gpu)
-        put("color", color.name); put("autoModel", autoModel)
+        put("color", color.name); put("autoModel", autoModel); put("compute", compute.name)
     }
     companion object {
         fun fromJson(o: JSONObject) = Settings(
             UpscaleModel.fromName(o.optString("model")), QualityPreset.fromName(o.optString("preset")),
             TargetResolution.fromName(o.optString("target")), o.optDouble("sharpen", 0.3).toFloat(),
             o.optBoolean("antiFlicker", true), o.optBoolean("hevc", true), o.optBoolean("gpu", true),
-            ColorMode.fromName(o.optString("color")), o.optBoolean("autoModel", true))
+            ColorMode.fromName(o.optString("color")), o.optBoolean("autoModel", true), ComputeMode.fromName(o.optString("compute")))
     }
 }
 
@@ -86,6 +89,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val analysis: StateFlow<ContentAnalyzer.Analysis?> = _analysis
     private val _download = MutableStateFlow(ModelDownloadState())
     val download: StateFlow<ModelDownloadState> = _download
+    private val _cloud = MutableStateFlow<CloudEngine.Health?>(null)
+    val cloud: StateFlow<CloudEngine.Health?> = _cloud
     private val _modelsAvailable = MutableStateFlow(UpscaleModel.entries.associateWith { ModelStore.isAvailable(app, it) })
     val modelsAvailable: StateFlow<Map<UpscaleModel, Boolean>> = _modelsAvailable
 
@@ -95,6 +100,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var previewJob: Job? = null
 
     val primary: SourceItem? get() = _sources.value.firstOrNull()
+
+    init { refreshCloud() }
+    fun refreshCloud() { viewModelScope.launch(Dispatchers.IO) { _cloud.value = runCatching { CloudEngine().health() }.getOrNull() ?: CloudEngine.Health(false, null, null, 0) } }
 
     fun addSources(uris: List<Uri>) {
         if (uris.isEmpty()) return
@@ -235,7 +243,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val t2 = ((i.width * 4 + step - 1) / step) * ((i.height * 4 + step - 1) / step)
             total += frames * t2 * msPerTile / 1000.0
         }
-        return total * 1.1 + 5
+        val cloudUp = _cloud.value?.ok == true
+        return when {
+            s.compute == ComputeMode.HYBRID && cloudUp -> total * 0.6 + 8
+            s.compute == ComputeMode.CLOUD && cloudUp -> (durMs / 1000.0) * (if (s.model == UpscaleModel.ULTRA_PLUS) 3.0 else 1.2) + 40 // upload + queue + GPU
+            else -> total * 1.1 + 5
+        }
     }
 
     val isMeasured: Boolean get() = PreviewEngine.cachedMsPerTile(_settings.value.model, _settings.value.gpu) != null
@@ -245,7 +258,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val s = _settings.value
         _sources.value.forEachIndexed { idx, src ->
             val (a, b) = if (idx == 0) _trim.value else 0L to 0L
-            UpscaleService.enqueue(ctx, UpscaleJob(src.uri, s.model, s.preset, s.target, s.sharpen, s.antiFlicker, s.hevc, s.gpu, a, b, s.color),
+            UpscaleService.enqueue(ctx, UpscaleJob(src.uri, s.model, s.preset, s.target, s.sharpen, s.antiFlicker, s.hevc, s.gpu, a, b, s.color, s.compute),
                 src.info?.displayName ?: "video")
         }
     }
@@ -257,7 +270,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val start = _trim.value.first
         val info = src.info
         val end = minOf(start + 10_000, info?.durationMs ?: (start + 10_000))
-        UpscaleService.enqueue(ctx, UpscaleJob(src.uri, s.model, s.preset, s.target, s.sharpen, s.antiFlicker, s.hevc, s.gpu, start, end, s.color),
+        UpscaleService.enqueue(ctx, UpscaleJob(src.uri, s.model, s.preset, s.target, s.sharpen, s.antiFlicker, s.hevc, s.gpu, start, end, s.color, s.compute),
             "TEST 10s • " + (info?.displayName ?: "video"))
     }
 

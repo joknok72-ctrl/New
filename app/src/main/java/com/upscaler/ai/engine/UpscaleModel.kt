@@ -98,3 +98,14 @@ enum class ColorMode(val labelAr: String, val labelEn: String) {
         fun fromName(n: String?): ColorMode = entries.firstOrNull { it.name == n } ?: OFF
     }
 }
+
+/** Where the AI runs. */
+enum class ComputeMode(val labelAr: String, val labelEn: String, val descAr: String, val descEn: String) {
+    DEVICE("الجهاز", "Device", "على GPU الموبايل — بدون إنترنت", "Phone GPU/NPU — works offline"),
+    HYBRID("هايبرد (أسرع)", "Hybrid (fastest)", "الموبايل + GPU سحابي مجاني يشتغلوا مع بعض", "Phone + free cloud GPU working in parallel"),
+    CLOUD("سحابي بالكامل", "Cloud only", "يرفع الفيديو لـ GPU مجاني (A10G/T4) ويرجّع النتيجة — أفضل للفيديوهات القصيرة", "Uploads the clip to a free GPU (A10G/T4) — best for short clips");
+
+    companion object {
+        fun fromName(n: String?): ComputeMode = entries.firstOrNull { it.name == n } ?: DEVICE
+    }
+}

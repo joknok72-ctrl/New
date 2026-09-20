@@ -12,8 +12,8 @@ android {
         applicationId = "com.upscaler.ai"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 4
+        versionName = "1.3.0"
         // ONNX Runtime ships arm64-v8a, armeabi-v7a, x86, x86_64.
         // arm64-v8a only: every Android phone since ~2017. Dropping x86_64 (emulator) saves ~40 MB.
         ndk { abiFilters += listOf("arm64-v8a") }

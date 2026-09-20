@@ -90,6 +90,12 @@ object S {
     val resumeBtn get() = t("استكمال", "Resume")
     val pausedLabel get() = t("متوقف مؤقتاً", "Paused")
     val compareHint get() = t("اسحب للمقارنة", "Drag to compare")
+    // v1.3 cloud
+    val compute get() = t("مكان المعالجة", "Where to process")
+    val cloudOnline get() = t("GPU سحابي متاح", "Cloud GPU online")
+    val cloudOffline get() = t("GPU سحابي غير متاح الآن — هيشتغل على الجهاز", "Cloud GPU offline — will run on device")
+    val cloudFrames get() = t("فريمات من السحابة", "cloud frames")
+    val cloudNote get() = t("السحابة مجانية (HuggingFace ZeroGPU / Kaggle). لتسريع أكبر شغّل نوتبوك Kaggle من الريبو.", "Cloud is free (HuggingFace ZeroGPU / Kaggle). For max speed run the Kaggle notebook from the repo.")
     val howItWorks get() = t("كيف يعمل؟", "How it works")
     val howItWorksBody get() = t(
         "1) يفك الفيديو بالهاردوير\n2) شبكة Real-ESRGAN تكبّر كل فريم ×4 على GPU/NPU\n3) يتخطى الفريمات المكررة ويثبّت النتيجة زمنياً\n4) يعيد الترميز HEVC مع نسخ الصوت الأصلي بدون فقدان",

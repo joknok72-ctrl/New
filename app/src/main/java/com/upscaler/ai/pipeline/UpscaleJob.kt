@@ -2,6 +2,7 @@ package com.upscaler.ai.pipeline
 
 import android.net.Uri
 import com.upscaler.ai.engine.ColorMode
+import com.upscaler.ai.engine.ComputeMode
 import com.upscaler.ai.engine.QualityPreset
 import com.upscaler.ai.engine.TargetResolution
 import com.upscaler.ai.engine.UpscaleModel
@@ -19,6 +20,7 @@ data class UpscaleJob(
     val startMs: Long = 0,
     val endMs: Long = 0,
     val colorMode: ColorMode = ColorMode.OFF,
+    val compute: ComputeMode = ComputeMode.DEVICE,
 )
 
 sealed class UpscaleState {
@@ -36,6 +38,7 @@ sealed class UpscaleState {
         val outputRes: String,
         val elapsedSeconds: Long,
         val paused: Boolean = false,
+        val cloudFrames: Long = 0,
     ) : UpscaleState()
     data class Done(
         val inputUri: Uri,
