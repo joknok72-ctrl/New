@@ -47,12 +47,33 @@
 | ⏯️ **Pause / resume** *(v1.2)* | From the app or the notification; paused time excluded from ETA |
 | ↔️ **Compare slider** *(v1.2)* | Drag a divider over the preview to compare before/after pixel-for-pixel |
 | 🔏 **Release-signed** *(v1.2)* | Stable signature → updates install over the previous version |
+| ☁️ **Free cloud GPU** *(v1.3)* | **Hybrid**: phone + cloud GPU process frames in parallel (ordered by a reorder buffer). **Cloud-only**: upload the clip, GPU does everything. Backends: HuggingFace **ZeroGPU A10G** (always on) and your own **Kaggle T4** (optional, 12 h sessions) |
+| 🌐 **Cloudflare Worker proxy** *(v1.3)* | Health-checked failover across backends, R2 content-addressed cache (identical frames never processed twice), backends switchable without an app update |
 
 ## 🔗 Links
 
 - **Repository**: https://github.com/joknok72-ctrl/New
 - **Latest APK**: https://github.com/joknok72-ctrl/New/releases/latest
 - **CI builds**: https://github.com/joknok72-ctrl/New/actions
+
+## ☁️ Cloud GPU (free)
+
+```
+📱 App ──► Cloudflare Worker (upscaler-cloud.<acct>.workers.dev)
+              ├─ health-check + pick fastest backend
+              ├─ R2 cache  (sha256 of frame/clip → result)
+              ├─► HuggingFace Space  Nick088/Real-ESRGAN_Pytorch  (ZeroGPU A10G, shared, always on)
+              └─► Kaggle notebook   cloud/kaggle/kaggle_gpu_backend.ipynb  (T4 x2, dedicated, manual start)
+```
+
+**Modes in the app:** `Device` (offline) · `Hybrid` (device + cloud in parallel, auto-fallback) · `Cloud only` (upload clip ≤ 60 MB).
+
+**To turn on the Kaggle T4 backend (fastest):**
+1. Upload `cloud/kaggle/kaggle_gpu_backend.ipynb` to Kaggle → Settings → Accelerator **GPU T4 x2**, Internet **On**
+2. Add-ons → Secrets: `ADMIN_KEY` (from your keystore backup folder) and `WORKER_URL`
+3. Run All. The notebook registers itself with the Worker; the app uses it automatically. When the session ends the Worker falls back to HF.
+
+**Deploy the Worker yourself:** `cd cloud/worker && wrangler r2 bucket create upscaler-cache && wrangler secret put ADMIN_KEY && wrangler deploy`
 
 ## 🏗️ Tech Stack
 
@@ -104,7 +125,7 @@ pip install torch onnx onnxruntime && python tools/export_models.py
 - [x] Batch queue (multiple videos) — v1.1
 - [x] Before/after preview + device benchmark — v1.1
 - [x] Trim / quick test — v1.1
-- [ ] Optional cloud GPU mode for 10× faster processing (paid API)
+- [x] Free cloud GPU (HF ZeroGPU / Kaggle) via Cloudflare Worker — v1.3
 - [x] Ultra+ full RRDBNet model for faces / fine detail — v1.2
 - [x] Auto content detection + colour grading + pause/resume — v1.2
 - [ ] Frame interpolation (RIFE) 15 fps → 60 fps
