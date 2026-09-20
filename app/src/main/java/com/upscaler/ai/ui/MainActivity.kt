@@ -44,6 +44,19 @@ import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.RangeSlider
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
+import com.upscaler.ai.engine.ColorMode
+import com.upscaler.ai.engine.ContentAnalyzer
+import com.upscaler.ai.engine.UpscaleModel
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
@@ -88,7 +101,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.upscaler.ai.engine.QualityPreset
 import com.upscaler.ai.engine.TargetResolution
-import com.upscaler.ai.engine.UpscaleModel
 import com.upscaler.ai.pipeline.UpscaleState
 import com.upscaler.ai.service.QueuedJob
 import com.upscaler.ai.util.Prefs
@@ -136,6 +148,7 @@ fun MainScreen(vm: MainViewModel) {
     val trim by vm.trim.collectAsState()
     val history by vm.history.collectAsState()
     val showHistory by vm.showHistory.collectAsState()
+    val analysis by vm.analysis.collectAsState()
     val ctx = androidx.compose.ui.platform.LocalContext.current
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(20)) { uris ->
@@ -163,7 +176,7 @@ fun MainScreen(vm: MainViewModel) {
             showHistory -> HistoryCard(history, onOpen = open, onShare = share, onClear = vm::clearHistory, onBack = vm::toggleHistory)
 
             active -> {
-                ProgressCard(state, onCancel = vm::cancelCurrent)
+                ProgressCard(state, onCancel = vm::cancelCurrent, onPause = vm::pause, onResume = vm::resume)
                 QueueCard(queue, onRemove = vm::removeQueued, onCancelAll = vm::cancelAll, onOpen = open)
             }
 
@@ -190,6 +203,7 @@ fun MainScreen(vm: MainViewModel) {
                 SourcesCard(sources, onPick = pick, onRemove = vm::removeSource)
                 val first = sources.firstOrNull()
                 if (first?.info != null) {
+                    analysis?.let { AnalysisBanner(it) }
                     PreviewCard(preview, onRun = vm::runPreview)
                     if (sources.size == 1) TrimCard(first.info.durationMs, trim, onChange = vm::setTrim)
                     SettingsCard(settings, vm)
@@ -292,19 +306,7 @@ private fun PreviewCard(p: PreviewState, onRun: () -> Unit) {
             Text(S.previewTitle, fontWeight = FontWeight.Bold, color = TextPrimary, modifier = Modifier.weight(1f))
             p.provider?.let { Text(it.uppercase(), color = Green, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
         }
-        if (p.before != null && p.after != null) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Column(Modifier.weight(1f)) {
-                    Image(p.before.asImageBitmap(), null, Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp)).background(Color.Black), contentScale = ContentScale.Fit,
-                        filterQuality = androidx.compose.ui.graphics.FilterQuality.None)
-                    Text(S.before, color = TextSecondary, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
-                }
-                Column(Modifier.weight(1f)) {
-                    Image(p.after.asImageBitmap(), null, Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp)).background(Color.Black), contentScale = ContentScale.Fit)
-                    Text(S.after, color = Accent, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 4.dp))
-                }
-            }
-        }
+        if (p.before != null && p.after != null) CompareView(p.before, p.after)
         p.error?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp) }
         if (p.loading) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -427,13 +429,29 @@ private fun SettingsCard(s: Settings, vm: MainViewModel) {
         }
 
         if (s.preset != QualityPreset.FAST) {
-            Label(S.model)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Label(S.model); Spacer(Modifier.weight(1f))
+                Text(S.autoModelOn, color = TextSecondary, fontSize = 11.sp); Spacer(Modifier.width(6.dp))
+                Switch(s.autoModel, { v -> vm.update { it.copy(autoModel = v) } }, Modifier.height(24.dp))
+            }
+            val avail by vm.modelsAvailable.collectAsState()
+            val dl by vm.download.collectAsState()
             UpscaleModel.entries.forEach { m ->
-                ChoiceRow(
-                    selected = s.model == m,
-                    title = if (S.ar) m.displayNameAr else m.displayNameEn,
-                    subtitle = if (S.ar) m.descriptionAr else m.descriptionEn,
-                ) { vm.update { it.copy(model = m) } }
+                val ok = avail[m] == true
+                ModelRow(
+                    selected = s.model == m, model = m, available = ok,
+                    downloading = dl.model == m, progress = dl.progress,
+                    onSelect = { if (ok) vm.pickModel(m) else vm.downloadModel(m) },
+                    onDelete = { vm.deleteModel(m) },
+                )
+            }
+            dl.error?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp) }
+        }
+
+        Label(S.colorMode)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            ColorMode.entries.forEach { c ->
+                Chip(if (S.ar) c.labelAr else c.labelEn, s.color == c, Modifier.weight(1f)) { vm.update { it.copy(color = c) } }
             }
         }
 
@@ -470,7 +488,7 @@ private fun EstimateCard(sec: Long?, measured: Boolean, count: Int) {
 }
 
 @Composable
-private fun ProgressCard(st: UpscaleState, onCancel: () -> Unit) {
+private fun ProgressCard(st: UpscaleState, onCancel: () -> Unit, onPause: () -> Unit, onResume: () -> Unit) {
     SectionCard {
         when (st) {
             is UpscaleState.Preparing -> {
@@ -496,11 +514,62 @@ private fun ProgressCard(st: UpscaleState, onCancel: () -> Unit) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     Stat(S.engine, st.provider.uppercase()); Stat(S.skipped, "${st.skipped}")
                 }
-                Text(S.screenOffOk, color = TextSecondary, fontSize = 12.sp)
+                if (st.paused) Text("⏸ " + S.pausedLabel, color = Amber, fontWeight = FontWeight.Bold)
+                else Text(S.screenOffOk, color = TextSecondary, fontSize = 12.sp)
             }
             else -> {}
         }
-        OutlinedButton(onClick = onCancel, Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) { Text(S.cancel) }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (st is UpscaleState.Running) {
+                OutlinedButton(onClick = if (st.paused) onResume else onPause, Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) {
+                    Icon(if (st.paused) Icons.Default.PlayArrow else Icons.Default.Pause, null); Spacer(Modifier.width(6.dp))
+                    Text(if (st.paused) S.resumeBtn else S.pause)
+                }
+            }
+            OutlinedButton(onClick = onCancel, Modifier.weight(1f), shape = RoundedCornerShape(14.dp)) { Text(S.cancel) }
+        }
+    }
+}
+
+@Composable
+private fun AnalysisBanner(a: ContentAnalyzer.Analysis) {
+    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = Accent2.copy(.12f))) {
+        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.AutoAwesome, null, tint = Accent2); Spacer(Modifier.width(10.dp))
+            Column {
+                Text(S.autoDetect, color = Accent2, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Text(if (S.ar) a.reasonAr else a.reasonEn, color = TextPrimary, fontSize = 13.sp)
+                if (a.recommendColorFix) Text(S.colorSuggested, color = Amber, fontSize = 12.sp)
+            }
+        }
+    }
+}
+
+/** Before/after with a draggable divider. "after" is downscaled to match "before" size on screen. */
+@Composable
+private fun CompareView(before: android.graphics.Bitmap, after: android.graphics.Bitmap) {
+    var frac by remember { mutableStateOf(0.5f) }
+    var size by remember { mutableStateOf(IntSize.Zero) }
+    val beforeImg = remember(before) { before.asImageBitmap() }
+    val afterImg = remember(after) { after.asImageBitmap() }
+    Box(
+        Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(14.dp)).background(Color.Black)
+            .onSizeChanged { size = it }
+            .pointerInput(Unit) { detectHorizontalDragGestures { change, _ -> if (size.width > 0) frac = (change.position.x / size.width).coerceIn(0.02f, 0.98f) } }
+    ) {
+        Image(afterImg, null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+        Image(beforeImg, null, Modifier.fillMaxSize().drawWithContent {
+            clipRect(right = this.size.width * frac) { this@drawWithContent.drawContent() }
+        }, contentScale = ContentScale.Fit, filterQuality = androidx.compose.ui.graphics.FilterQuality.None)
+        // divider
+        Box(Modifier.fillMaxSize().drawWithContent {
+            drawContent()
+            val x = this.size.width * frac
+            drawRect(Color.White, Offset(x - 1.5f, 0f), Size(3f, this.size.height))
+        })
+        Text(S.before, color = Color.White, fontSize = 11.sp, modifier = Modifier.align(Alignment.TopStart).padding(8.dp).background(Color.Black.copy(.5f), RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp))
+        Text(S.after, color = Accent, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).background(Color.Black.copy(.5f), RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp))
+        Text(S.compareHint, color = Color.White.copy(.7f), fontSize = 10.sp, modifier = Modifier.align(Alignment.BottomCenter).padding(6.dp))
     }
 }
 
@@ -578,6 +647,30 @@ private fun ChoiceRow(selected: Boolean, title: String, subtitle: String? = null
             subtitle?.let { Text(it, color = TextSecondary, fontSize = 12.sp) }
         }
         if (selected) Icon(Icons.Default.CheckCircle, null, tint = Accent, modifier = Modifier.size(20.dp))
+    }
+}
+
+@Composable
+private fun ModelRow(selected: Boolean, model: UpscaleModel, available: Boolean, downloading: Boolean, progress: Float, onSelect: () -> Unit, onDelete: () -> Unit) {
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
+            .background(if (selected) Accent.copy(.14f) else Surface2)
+            .border(1.dp, if (selected) Accent else Color.Transparent, RoundedCornerShape(14.dp))
+            .clickable(enabled = !downloading, onClick = onSelect).padding(horizontal = 14.dp, vertical = 12.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(if (S.ar) model.displayNameAr else model.displayNameEn, color = TextPrimary, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium)
+                Text(if (S.ar) model.descriptionAr else model.descriptionEn, color = TextSecondary, fontSize = 12.sp)
+            }
+            when {
+                downloading -> Text("${(progress * 100).toInt()}%", color = Accent, fontWeight = FontWeight.Bold)
+                !available -> Row(verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.Download, null, tint = Accent2, modifier = Modifier.size(18.dp)); Spacer(Modifier.width(4.dp)); Text("${S.downloadModel} ${model.downloadSizeMb} MB", color = Accent2, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+                selected -> Icon(Icons.Default.CheckCircle, null, tint = Accent, modifier = Modifier.size(20.dp))
+            }
+            if (available && model.isDownloadable && !downloading) IconButton(onClick = onDelete, Modifier.size(28.dp)) { Icon(Icons.Default.Delete, S.deleteModel, tint = TextSecondary, modifier = Modifier.size(16.dp)) }
+        }
+        if (downloading) LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp).height(4.dp).clip(RoundedCornerShape(2.dp)), color = Accent, trackColor = Surface1)
     }
 }
 
