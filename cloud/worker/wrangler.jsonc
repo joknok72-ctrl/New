@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "upscaler-cloud",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "account_id": "eaf25271df0b9542788879e4ce19897a",
+  "workers_dev": true,
+  "r2_buckets": [
+    { "binding": "R2", "bucket_name": "upscaler-cache" }
+  ],
+  "vars": {
+    // Comma-separated Gradio spaces running Real-ESRGAN (ZeroGPU first). Format: host|fn_index_image|fn_index_video
+    "HF_SPACES": "https://nick088-real-esrgan-pytorch.hf.space|0|3|2",
+    "MAX_VIDEO_BYTES": "60000000"
+  }
+}
