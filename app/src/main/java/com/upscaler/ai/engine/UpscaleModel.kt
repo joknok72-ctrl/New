@@ -1,7 +1,7 @@
 package com.upscaler.ai.engine
 
 /**
- * Available AI models bundled in assets/models/*.onnx
+ * Available AI models bundled in assets/models (ONNX files)
  * All are Real-ESRGAN "SRVGGNetCompact" x4 networks (BSD-3 license, xinntao).
  */
 enum class UpscaleModel(

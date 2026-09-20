@@ -56,15 +56,17 @@ class FrameAnalyzer {
                 cur[ty * T + tx] = sum.toFloat() / n
             }
         }
-        var diff = 0f
-        if (hasPrev) {
+        val diff: Float = if (hasPrev) {
             var acc = 0f
             for (i in 0 until T * T) acc += abs(cur[i] - prev[i])
-            diff = acc / (T * T)
-        } else diff = 255f
+            acc / (T * T)
+        } else 255f
+        val first = !hasPrev
         System.arraycopy(cur, 0, prev, 0, T * T)
         hasPrev = true
-        return Result(diff, hasPrev && diff < DUP_THRESHOLD, diff > CUT_THRESHOLD)
+        val isDup = !first && (diff < DUP_THRESHOLD)
+        val isCut = diff > CUT_THRESHOLD
+        return Result(diff, isDup, isCut)
     }
 
     fun reset() { hasPrev = false }
