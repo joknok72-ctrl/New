@@ -26,6 +26,8 @@ class VideoEncoder(
     copyAudio: Boolean,
     preferHevc: Boolean = true,
     rotationHint: Int = 0,
+    private val audioStartUs: Long = 0,
+    private val audioEndUs: Long = Long.MAX_VALUE,
 ) : AutoCloseable {
     companion object {
         private const val TAG = "VideoEncoder"
@@ -97,6 +99,7 @@ class VideoEncoder(
                 val f = ex.getTrackFormat(i)
                 if (f.getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true) {
                     ex.selectTrack(i)
+                    if (audioStartUs > 0) ex.seekTo(audioStartUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
                     audioExtractor = ex
                     audioFormat = f
                     return
@@ -150,7 +153,10 @@ class VideoEncoder(
         while (true) {
             val size = ex.readSampleData(buf, 0)
             if (size < 0) break
-            bi.offset = 0; bi.size = size; bi.presentationTimeUs = ex.sampleTime
+            val pts = ex.sampleTime
+            if (pts > audioEndUs) break
+            if (pts < audioStartUs) { ex.advance(); continue }
+            bi.offset = 0; bi.size = size; bi.presentationTimeUs = pts - audioStartUs
             bi.flags = if (ex.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
             muxer.writeSampleData(audioTrack, buf, bi)
             ex.advance(); n++

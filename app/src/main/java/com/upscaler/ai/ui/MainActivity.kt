@@ -33,7 +33,18 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCut
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.HourglassEmpty
+import androidx.compose.material.icons.filled.Science
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.RangeSlider
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
@@ -80,6 +91,8 @@ import com.upscaler.ai.engine.QualityPreset
 import com.upscaler.ai.engine.TargetResolution
 import com.upscaler.ai.engine.UpscaleModel
 import com.upscaler.ai.pipeline.UpscaleState
+import com.upscaler.ai.service.QueuedJob
+import com.upscaler.ai.util.Prefs
 
 class MainActivity : ComponentActivity() {
     private val vm: MainViewModel by viewModels()
@@ -97,10 +110,17 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleShare(i: Intent?) {
-        if (i?.action == Intent.ACTION_SEND) {
-            val uri: Uri? = if (Build.VERSION.SDK_INT >= 33) i.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
-                            else @Suppress("DEPRECATION") i.getParcelableExtra(Intent.EXTRA_STREAM)
-            uri?.let { vm.setInput(it) }
+        when (i?.action) {
+            Intent.ACTION_SEND -> {
+                val uri: Uri? = if (Build.VERSION.SDK_INT >= 33) i.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                                else @Suppress("DEPRECATION") i.getParcelableExtra(Intent.EXTRA_STREAM)
+                uri?.let { vm.addSources(listOf(it)) }
+            }
+            Intent.ACTION_SEND_MULTIPLE -> {
+                val uris: List<Uri>? = if (Build.VERSION.SDK_INT >= 33) i.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                                       else @Suppress("DEPRECATION") i.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
+                uris?.let { vm.addSources(it) }
+            }
         }
     }
 }
@@ -109,55 +129,86 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun MainScreen(vm: MainViewModel) {
-    val input by vm.input.collectAsState()
-    val info by vm.info.collectAsState()
-    val thumb by vm.thumb.collectAsState()
+    val sources by vm.sources.collectAsState()
     val settings by vm.settings.collectAsState()
     val state by vm.state.collectAsState()
+    val queue by vm.queue.collectAsState()
+    val preview by vm.preview.collectAsState()
+    val trim by vm.trim.collectAsState()
+    val history by vm.history.collectAsState()
+    val showHistory by vm.showHistory.collectAsState()
     val ctx = androidx.compose.ui.platform.LocalContext.current
 
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        uri?.let { vm.setInput(it) }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(20)) { uris ->
+        if (uris.isNotEmpty()) vm.addSources(uris)
     }
     val notifPerm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     LaunchedEffect(Unit) {
         if (Build.VERSION.SDK_INT >= 33) notifPerm.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
+    val pick = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)) }
+    val open: (Uri) -> Unit = { u -> runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW).apply { setDataAndType(u, "video/mp4"); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }) } }
+    val share: (Uri) -> Unit = { u -> ctx.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "video/mp4"; putExtra(Intent.EXTRA_STREAM, u); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }, null)) }
+
+    val active = queue.any { it.status == QueuedJob.Status.WAITING || it.status == QueuedJob.Status.RUNNING }
+    val finished = queue.isNotEmpty() && !active
 
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).statusBarsPadding().padding(horizontal = 18.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         Spacer(Modifier.height(8.dp))
-        Header()
+        Header(onHistory = vm::toggleHistory, historyOpen = showHistory)
 
-        when (val st = state) {
-            is UpscaleState.Preparing, is UpscaleState.Running -> ProgressCard(st, onCancel = vm::cancel)
-            is UpscaleState.Done -> DoneCard(st, onNew = vm::reset, onOpen = {
-                ctx.startActivity(Intent(Intent.ACTION_VIEW).apply { setDataAndType(st.outputUri, "video/mp4"); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) })
-            }, onShare = {
-                ctx.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "video/mp4"; putExtra(Intent.EXTRA_STREAM, st.outputUri); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }, null))
-            })
-            is UpscaleState.Failed -> FailedCard(st.error, onRetry = vm::start, onNew = vm::reset)
-            is UpscaleState.Cancelled -> FailedCard(S.cancelled, onRetry = vm::start, onNew = vm::reset)
-            UpscaleState.Idle -> {
-                SourceCard(thumb = thumb, info = info, hasInput = input != null) {
-                    picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly))
-                }
-                if (input != null) {
-                    SettingsCard(settings, vm)
-                    EstimateCard(vm.estimateSeconds(), settings, info?.durationMs)
-                    Button(
-                        onClick = vm::start, enabled = info != null,
-                        modifier = Modifier.fillMaxWidth().height(58.dp),
-                        shape = RoundedCornerShape(18.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Bg)
-                    ) {
-                        Icon(Icons.Default.AutoAwesome, null); Spacer(Modifier.width(10.dp))
-                        Text(S.start, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        when {
+            showHistory -> HistoryCard(history, onOpen = open, onShare = share, onClear = vm::clearHistory, onBack = vm::toggleHistory)
+
+            active -> {
+                ProgressCard(state, onCancel = vm::cancelCurrent)
+                QueueCard(queue, onRemove = vm::removeQueued, onCancelAll = vm::cancelAll, onOpen = open)
+            }
+
+            finished -> {
+                val done = queue.filter { it.status == QueuedJob.Status.DONE }
+                val single = queue.size == 1
+                val st = queue.first().result
+                if (single && st is UpscaleState.Done) DoneCard(st, onNew = vm::reset, onOpen = { open(st.outputUri) }, onShare = { share(st.outputUri) })
+                else if (single && st is UpscaleState.Failed) FailedCard(st.error, onRetry = vm::startAll, onNew = vm::reset)
+                else if (single) FailedCard(S.cancelled, onRetry = vm::startAll, onNew = vm::reset)
+                else {
+                    SectionCard {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.CheckCircle, null, tint = Green, modifier = Modifier.size(36.dp)); Spacer(Modifier.width(12.dp))
+                            Text("${S.allDone} (${done.size}/${queue.size})", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                        }
+                        Button(onClick = vm::reset, Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) { Text(S.newVideo) }
                     }
-                    Text(S.keepPlugged, color = TextSecondary, fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
-                } else HowItWorks()
+                    QueueCard(queue, onRemove = {}, onCancelAll = null, onOpen = open)
+                }
+            }
+
+            else -> {
+                SourcesCard(sources, onPick = pick, onRemove = vm::removeSource)
+                val first = sources.firstOrNull()
+                if (first?.info != null) {
+                    PreviewCard(preview, onRun = vm::runPreview)
+                    if (sources.size == 1) TrimCard(first.info.durationMs, trim, onChange = vm::setTrim)
+                    SettingsCard(settings, vm)
+                    EstimateCard(vm.estimateSeconds(), vm.isMeasured, sources.size)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(onClick = vm::startQuickTest, Modifier.weight(1f).height(58.dp), shape = RoundedCornerShape(18.dp)) {
+                            Icon(Icons.Default.Science, null); Spacer(Modifier.width(6.dp)); Text(S.quickTest, fontSize = 13.sp, maxLines = 2, textAlign = TextAlign.Center)
+                        }
+                        Button(
+                            onClick = vm::startAll, modifier = Modifier.weight(1.4f).height(58.dp), shape = RoundedCornerShape(18.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Bg)
+                        ) {
+                            Icon(Icons.Default.AutoAwesome, null); Spacer(Modifier.width(8.dp))
+                            Text(if (sources.size > 1) "${S.startAll} (${sources.size})" else S.start, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    Text(S.keepPlugged + "  •  " + S.thermalNote, color = TextSecondary, fontSize = 11.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+                } else if (sources.isEmpty()) HowItWorks()
             }
         }
         Spacer(Modifier.height(28.dp))
@@ -165,7 +216,7 @@ fun MainScreen(vm: MainViewModel) {
 }
 
 @Composable
-private fun Header() {
+private fun Header(onHistory: () -> Unit, historyOpen: Boolean) {
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
@@ -174,10 +225,11 @@ private fun Header() {
                 contentAlignment = Alignment.Center
             ) { Icon(Icons.Default.AutoAwesome, null, tint = Color.White) }
             Spacer(Modifier.width(12.dp))
-            Column {
-                Text(S.title, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, color = TextPrimary)
-                Text(S.subtitle, fontSize = 12.sp, color = TextSecondary)
+            Column(Modifier.weight(1f)) {
+                Text(S.title, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, color = TextPrimary)
+                Text(S.subtitle, fontSize = 11.sp, color = TextSecondary)
             }
+            IconButton(onClick = onHistory) { Icon(Icons.Default.History, S.history, tint = if (historyOpen) Accent else TextSecondary) }
         }
     }
 }
@@ -191,9 +243,9 @@ private fun SectionCard(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun SourceCard(thumb: android.graphics.Bitmap?, info: com.upscaler.ai.video.VideoInfo?, hasInput: Boolean, onPick: () -> Unit) {
+private fun SourcesCard(sources: List<SourceItem>, onPick: () -> Unit, onRemove: (Uri) -> Unit) {
     SectionCard {
-        if (!hasInput) {
+        if (sources.isEmpty()) {
             Box(
                 Modifier.fillMaxWidth().height(180.dp).clip(RoundedCornerShape(16.dp))
                     .border(1.5.dp, Accent.copy(alpha = .4f), RoundedCornerShape(16.dp))
@@ -207,19 +259,149 @@ private fun SourceCard(thumb: android.graphics.Bitmap?, info: com.upscaler.ai.vi
                 }
             }
         } else {
+            val first = sources.first()
             Box(Modifier.fillMaxWidth().aspectRatio(16 / 9f).clip(RoundedCornerShape(16.dp)).background(Color.Black)) {
-                thumb?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit) }
-                if (info == null) CircularProgressIndicator(Modifier.align(Alignment.Center), color = Accent)
-                info?.let {
+                first.thumb?.let { Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Fit) }
+                if (first.info == null) CircularProgressIndicator(Modifier.align(Alignment.Center), color = Accent)
+                first.info?.let {
                     Text("${it.displayWidth}×${it.displayHeight}", color = Color.White, fontWeight = FontWeight.Bold,
                         modifier = Modifier.align(Alignment.BottomStart).padding(10.dp).background(Color.Black.copy(.55f), RoundedCornerShape(8.dp)).padding(horizontal = 8.dp, vertical = 4.dp))
                     Text(fmtDur(it.durationMs) + "  •  ${"%.0f".format(it.fps)} fps", color = Color.White,
                         modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp).background(Color.Black.copy(.55f), RoundedCornerShape(8.dp)).padding(horizontal = 8.dp, vertical = 4.dp))
                 }
             }
-            info?.let { Text(it.displayName, color = TextSecondary, fontSize = 12.sp, maxLines = 1) }
-            OutlinedButton(onClick = onPick, Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) { Text(S.changeVideo) }
+            sources.forEach { src ->
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.VideoLibrary, null, tint = TextSecondary, modifier = Modifier.size(16.dp)); Spacer(Modifier.width(8.dp))
+                    Text(src.info?.displayName ?: "…", color = TextSecondary, fontSize = 12.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                    src.info?.let { Text("${it.displayWidth}×${it.displayHeight}", color = TextSecondary, fontSize = 11.sp) }
+                    IconButton(onClick = { onRemove(src.uri) }, Modifier.size(28.dp)) { Icon(Icons.Default.Close, S.remove, tint = TextSecondary, modifier = Modifier.size(16.dp)) }
+                }
+            }
+            OutlinedButton(onClick = onPick, Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
+                Icon(Icons.Default.Add, null); Spacer(Modifier.width(6.dp)); Text(if (sources.size > 1) "${S.addVideos} (${sources.size} ${S.videosSelected})" else S.addVideos)
+            }
         }
+    }
+}
+
+@Composable
+private fun PreviewCard(p: PreviewState, onRun: () -> Unit) {
+    SectionCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.Visibility, null, tint = Accent2); Spacer(Modifier.width(8.dp))
+            Text(S.previewTitle, fontWeight = FontWeight.Bold, color = TextPrimary, modifier = Modifier.weight(1f))
+            p.provider?.let { Text(it.uppercase(), color = Green, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+        }
+        if (p.before != null && p.after != null) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(Modifier.weight(1f)) {
+                    Image(p.before.asImageBitmap(), null, Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp)).background(Color.Black), contentScale = ContentScale.Fit,
+                        filterQuality = androidx.compose.ui.graphics.FilterQuality.None)
+                    Text(S.before, color = TextSecondary, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+                }
+                Column(Modifier.weight(1f)) {
+                    Image(p.after.asImageBitmap(), null, Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp)).background(Color.Black), contentScale = ContentScale.Fit)
+                    Text(S.after, color = Accent, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 4.dp))
+                }
+            }
+        }
+        p.error?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp) }
+        if (p.loading) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(18.dp), color = Accent, strokeWidth = 2.dp); Spacer(Modifier.width(10.dp))
+                Text(S.measuring, color = TextSecondary, fontSize = 13.sp)
+            }
+        } else {
+            OutlinedButton(onClick = onRun, Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) {
+                Icon(Icons.Default.Speed, null); Spacer(Modifier.width(6.dp)); Text(S.previewBtn, fontSize = 13.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun TrimCard(durationMs: Long, trim: Pair<Long, Long>, onChange: (Long, Long) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val startMs = trim.first
+    val endMs = if (trim.second <= 0) durationMs else trim.second
+    SectionCard {
+        Row(Modifier.fillMaxWidth().clickable { open = !open }, verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.ContentCut, null, tint = Pink); Spacer(Modifier.width(8.dp))
+            Column(Modifier.weight(1f)) {
+                Text(S.trim, fontWeight = FontWeight.Bold, color = TextPrimary)
+                Text(if (trim.second > 0 || trim.first > 0) "${fmtDur(startMs)} → ${fmtDur(endMs)}" else S.trimHint, color = TextSecondary, fontSize = 12.sp)
+            }
+            Icon(if (open) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null, tint = TextSecondary)
+        }
+        if (open) {
+            RangeSlider(
+                value = startMs.toFloat()..endMs.toFloat(),
+                onValueChange = { r -> onChange(r.start.toLong(), if (r.endInclusive.toLong() >= durationMs - 200) 0L else r.endInclusive.toLong()) },
+                valueRange = 0f..durationMs.toFloat(),
+            )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Stat(S.from, fmtDur(startMs)); Stat(S.duration, fmtDur(endMs - startMs)); Stat(S.to, fmtDur(endMs))
+            }
+        }
+    }
+}
+
+@Composable
+private fun QueueCard(queue: List<QueuedJob>, onRemove: (Long) -> Unit, onCancelAll: (() -> Unit)?, onOpen: (Uri) -> Unit) {
+    if (queue.size <= 1 && onCancelAll != null) return
+    SectionCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("${S.queueTitle} (${queue.size})", fontWeight = FontWeight.Bold, color = TextPrimary, modifier = Modifier.weight(1f))
+            onCancelAll?.let { OutlinedButton(onClick = it, shape = RoundedCornerShape(10.dp)) { Text(S.cancelAll, fontSize = 12.sp) } }
+        }
+        queue.forEach { q ->
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Surface2).padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                val (icon, tint) = when (q.status) {
+                    QueuedJob.Status.WAITING -> Icons.Default.HourglassEmpty to TextSecondary
+                    QueuedJob.Status.RUNNING -> Icons.Default.Bolt to Accent
+                    QueuedJob.Status.DONE -> Icons.Default.CheckCircle to Green
+                    QueuedJob.Status.FAILED -> Icons.Default.Error to MaterialTheme.colorScheme.error
+                    QueuedJob.Status.CANCELLED -> Icons.Default.Close to Amber
+                }
+                Icon(icon, null, tint = tint, modifier = Modifier.size(20.dp)); Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(q.displayName, color = TextPrimary, fontSize = 13.sp, maxLines = 1)
+                    val sub = when (val r = q.result) {
+                        is UpscaleState.Done -> "${r.outputRes} • ${fmtSec(r.elapsedSeconds)} • ${"%.1f".format(r.sizeBytes / 1e6)} MB"
+                        is UpscaleState.Failed -> r.error
+                        else -> when (q.status) { QueuedJob.Status.WAITING -> S.waiting; QueuedJob.Status.RUNNING -> S.running; else -> S.cancelled }
+                    }
+                    Text(sub, color = TextSecondary, fontSize = 11.sp, maxLines = 1)
+                }
+                when {
+                    q.status == QueuedJob.Status.WAITING -> IconButton(onClick = { onRemove(q.id) }, Modifier.size(28.dp)) { Icon(Icons.Default.Close, S.remove, tint = TextSecondary, modifier = Modifier.size(16.dp)) }
+                    q.result is UpscaleState.Done -> IconButton(onClick = { onOpen((q.result as UpscaleState.Done).outputUri) }, Modifier.size(28.dp)) { Icon(Icons.Default.PlayArrow, S.open, tint = Accent) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HistoryCard(items: List<Prefs.HistoryItem>, onOpen: (Uri) -> Unit, onShare: (Uri) -> Unit, onClear: () -> Unit, onBack: () -> Unit) {
+    SectionCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.History, null, tint = Accent); Spacer(Modifier.width(8.dp))
+            Text(S.history, fontWeight = FontWeight.Bold, color = TextPrimary, fontSize = 18.sp, modifier = Modifier.weight(1f))
+            if (items.isNotEmpty()) IconButton(onClick = onClear) { Icon(Icons.Default.Delete, S.clearHistory, tint = TextSecondary) }
+        }
+        if (items.isEmpty()) Text(S.historyEmpty, color = TextSecondary)
+        items.forEach { h ->
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Surface2).clickable { onOpen(h.outputUri) }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(h.name, color = TextPrimary, fontSize = 13.sp, maxLines = 1)
+                    Text("${h.outputRes} • ${fmtSec(h.elapsedSec)} • ${"%.1f".format(h.sizeBytes / 1e6)} MB • ${java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.SHORT, java.text.DateFormat.SHORT).format(java.util.Date(h.timestamp))}", color = TextSecondary, fontSize = 11.sp, maxLines = 1)
+                }
+                IconButton(onClick = { onShare(h.outputUri) }, Modifier.size(32.dp)) { Icon(Icons.Default.Share, S.share, tint = Accent, modifier = Modifier.size(18.dp)) }
+            }
+        }
+        OutlinedButton(onClick = onBack, Modifier.fillMaxWidth(), shape = RoundedCornerShape(14.dp)) { Text(S.back) }
     }
 }
 
@@ -271,7 +453,7 @@ private fun SettingsCard(s: Settings, vm: MainViewModel) {
 }
 
 @Composable
-private fun EstimateCard(sec: Long?, s: Settings, durMs: Long?) {
+private fun EstimateCard(sec: Long?, measured: Boolean, count: Int) {
     if (sec == null) return
     val warn = sec > 30 * 60
     Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp),
@@ -280,9 +462,9 @@ private fun EstimateCard(sec: Long?, s: Settings, durMs: Long?) {
             Icon(Icons.Default.Timer, null, tint = if (warn) Amber else Accent)
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
-                Text("${S.estimate}: ~${fmtSec(sec)}", color = TextPrimary, fontWeight = FontWeight.Bold)
+                Text("${S.estimate}: ~${fmtSec(sec)}" + (if (count > 1) "  ($count)" else ""), color = TextPrimary, fontWeight = FontWeight.Bold)
                 if (warn) Text(S.tooLong, color = Amber, fontSize = 12.sp)
-                else durMs?.let { Text("${S.duration}: ${fmtDur(it)}", color = TextSecondary, fontSize = 12.sp) }
+                else Text(if (measured) "✓ " + S.measured else S.estimatedRough, color = if (measured) Green else TextSecondary, fontSize = 12.sp)
             }
         }
     }

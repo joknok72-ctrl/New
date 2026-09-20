@@ -21,6 +21,7 @@ import com.upscaler.ai.pipeline.UpscaleJob
 import com.upscaler.ai.pipeline.UpscalePipeline
 import com.upscaler.ai.pipeline.UpscaleState
 import com.upscaler.ai.ui.MainActivity
+import com.upscaler.ai.util.Prefs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -29,27 +30,44 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import java.util.concurrent.CopyOnWriteArrayList
+
+/** A job waiting in / running from the batch queue. */
+data class QueuedJob(val id: Long, val job: UpscaleJob, val displayName: String) {
+    var status: Status = Status.WAITING
+    var result: UpscaleState? = null
+    enum class Status { WAITING, RUNNING, DONE, FAILED, CANCELLED }
+}
 
 /**
- * Foreground service so the upscale keeps running with the screen off / app in background.
- * Holds a partial wake lock (CPU/GPU stay on). State is exposed via a process-wide StateFlow
- * that the UI observes — simple and robust, no binder needed.
+ * Foreground service that processes a FIFO queue of upscale jobs one after another.
+ * Holds a partial wake lock (CPU/GPU stay on). State is exposed via process-wide StateFlows.
  */
 class UpscaleService : Service() {
 
     companion object {
         private const val NOTIF_ID = 1001
-        private const val ACTION_START = "com.upscaler.ai.START"
-        private const val ACTION_CANCEL = "com.upscaler.ai.CANCEL"
+        private const val ACTION_ENQUEUE = "com.upscaler.ai.ENQUEUE"
+        private const val ACTION_CANCEL_CURRENT = "com.upscaler.ai.CANCEL_CURRENT"
+        private const val ACTION_CANCEL_ALL = "com.upscaler.ai.CANCEL_ALL"
+        private const val ACTION_REMOVE = "com.upscaler.ai.REMOVE"
 
         private val _state = MutableStateFlow<UpscaleState>(UpscaleState.Idle)
+        /** State of the *currently running* job. */
         val state: StateFlow<UpscaleState> = _state
+
+        private val _queue = MutableStateFlow<List<QueuedJob>>(emptyList())
+        val queue: StateFlow<List<QueuedJob>> = _queue
+        private val items = CopyOnWriteArrayList<QueuedJob>()
+        private var nextId = 1L
+
         val isRunning get() = _state.value is UpscaleState.Running || _state.value is UpscaleState.Preparing
 
-        fun start(ctx: Context, job: UpscaleJob) {
+        fun enqueue(ctx: Context, job: UpscaleJob, displayName: String) {
             val i = Intent(ctx, UpscaleService::class.java).apply {
-                action = ACTION_START
+                action = ACTION_ENQUEUE
                 putExtra("uri", job.inputUri.toString())
+                putExtra("name", displayName)
                 putExtra("model", job.model.name)
                 putExtra("preset", job.preset.name)
                 putExtra("target", job.target.name)
@@ -57,29 +75,46 @@ class UpscaleService : Service() {
                 putExtra("antiFlicker", job.antiFlicker)
                 putExtra("hevc", job.preferHevc)
                 putExtra("gpu", job.useGpu)
+                putExtra("startMs", job.startMs)
+                putExtra("endMs", job.endMs)
             }
             if (Build.VERSION.SDK_INT >= 26) ctx.startForegroundService(i) else ctx.startService(i)
         }
 
-        fun cancel(ctx: Context) {
-            ctx.startService(Intent(ctx, UpscaleService::class.java).apply { action = ACTION_CANCEL })
+        fun cancelCurrent(ctx: Context) = ctx.startService(Intent(ctx, UpscaleService::class.java).apply { action = ACTION_CANCEL_CURRENT })
+        fun cancelAll(ctx: Context) = ctx.startService(Intent(ctx, UpscaleService::class.java).apply { action = ACTION_CANCEL_ALL })
+        fun remove(ctx: Context, id: Long) = ctx.startService(Intent(ctx, UpscaleService::class.java).apply { action = ACTION_REMOVE; putExtra("id", id) })
+
+        fun clearFinished() {
+            items.removeAll { it.status != QueuedJob.Status.WAITING && it.status != QueuedJob.Status.RUNNING }
+            _queue.value = items.toList()
+            if (!isRunning) _state.value = UpscaleState.Idle
         }
 
         fun resetState() { if (!isRunning) _state.value = UpscaleState.Idle }
+        private fun publish() { _queue.value = items.toList() }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private var jobHandle: Job? = null
+    private var worker: Job? = null
+    private var currentJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
-    private var pipeline: UpscalePipeline? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_CANCEL -> { jobHandle?.cancel(); stopSelfSafely(); return START_NOT_STICKY }
-            ACTION_START -> {
-                if (jobHandle?.isActive == true) return START_NOT_STICKY
+            ACTION_CANCEL_CURRENT -> currentJob?.cancel()
+            ACTION_CANCEL_ALL -> {
+                items.filter { it.status == QueuedJob.Status.WAITING }.forEach { it.status = QueuedJob.Status.CANCELLED }
+                publish(); currentJob?.cancel()
+            }
+            ACTION_REMOVE -> {
+                val id = intent.getLongExtra("id", -1)
+                items.firstOrNull { it.id == id && it.status == QueuedJob.Status.WAITING }?.let { items.remove(it); publish() }
+                if (items.none { it.status == QueuedJob.Status.WAITING || it.status == QueuedJob.Status.RUNNING }) stopSelfSafely()
+            }
+            ACTION_ENQUEUE -> {
                 val job = UpscaleJob(
                     inputUri = Uri.parse(intent.getStringExtra("uri")!!),
                     model = UpscaleModel.fromName(intent.getStringExtra("model")),
@@ -89,51 +124,75 @@ class UpscaleService : Service() {
                     antiFlicker = intent.getBooleanExtra("antiFlicker", true),
                     preferHevc = intent.getBooleanExtra("hevc", true),
                     useGpu = intent.getBooleanExtra("gpu", true),
+                    startMs = intent.getLongExtra("startMs", 0),
+                    endMs = intent.getLongExtra("endMs", 0),
                 )
+                items.add(QueuedJob(nextId++, job, intent.getStringExtra("name") ?: "video"))
+                publish()
                 startInForeground(buildNotification(getString(R.string.notif_title), 0, true))
-                acquireWakeLock()
-                val p = UpscalePipeline(this)
-                pipeline = p
-                jobHandle = scope.launch {
-                    val collector = launch {
-                        p.state.collect { st ->
-                            _state.value = st
-                            updateNotification(st)
-                        }
-                    }
-                    try { p.run(job) } finally { collector.cancel() }
-                    _state.value = p.state.value
-                    updateNotification(p.state.value)
-                    stopSelfSafely()
-                }
+                if (worker?.isActive != true) startWorker()
             }
         }
         return START_NOT_STICKY
     }
 
-    private fun startInForeground(n: Notification) {
-        if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING)
-        } else startForeground(NOTIF_ID, n)
-    }
-
-    private fun acquireWakeLock() {
-        val pm = getSystemService(POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VideoUpscalerAI:upscale").also {
-            it.setReferenceCounted(false)
-            it.acquire(3 * 60 * 60 * 1000L) // hard cap 3h
+    private fun startWorker() {
+        acquireWakeLock()
+        worker = scope.launch {
+            while (true) {
+                val next = items.firstOrNull { it.status == QueuedJob.Status.WAITING } ?: break
+                next.status = QueuedJob.Status.RUNNING; publish()
+                val p = UpscalePipeline(this@UpscaleService)
+                val queuedLeft = items.count { it.status == QueuedJob.Status.WAITING }
+                currentJob = launch {
+                    val collector = launch {
+                        p.state.collect { st -> _state.value = st; updateNotification(st, next.displayName, queuedLeft) }
+                    }
+                    try { p.run(next.job) } finally { collector.cancel() }
+                }
+                currentJob?.join()
+                val res = p.state.value
+                next.result = res
+                next.status = when (res) {
+                    is UpscaleState.Done -> {
+                        Prefs.addHistory(this@UpscaleService, Prefs.HistoryItem(res.outputUri, res.outputPath, res.outputRes,
+                            res.elapsedSeconds, res.sizeBytes, System.currentTimeMillis(), next.job.preset.name, next.job.model.name))
+                        QueuedJob.Status.DONE
+                    }
+                    is UpscaleState.Cancelled -> QueuedJob.Status.CANCELLED
+                    else -> QueuedJob.Status.FAILED
+                }
+                _state.value = res
+                publish()
+                updateNotification(res, next.displayName, items.count { it.status == QueuedJob.Status.WAITING })
+            }
+            stopSelfSafely()
         }
     }
 
-    private fun buildNotification(text: String, progress: Int, indeterminate: Boolean, done: Boolean = false): Notification {
+    private fun startInForeground(n: Notification) {
+        if (Build.VERSION.SDK_INT >= 34) startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING)
+        else startForeground(NOTIF_ID, n)
+    }
+
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        val pm = getSystemService(POWER_SERVICE) as PowerManager
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VideoUpscalerAI:upscale").also {
+            it.setReferenceCounted(false)
+            it.acquire(6 * 60 * 60 * 1000L)
+        }
+    }
+
+    private fun buildNotification(text: String, progress: Int, indeterminate: Boolean, done: Boolean = false, title: String? = null): Notification {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val cancel = PendingIntent.getService(this, 1,
-            Intent(this, UpscaleService::class.java).apply { action = ACTION_CANCEL },
+            Intent(this, UpscaleService::class.java).apply { action = ACTION_CANCEL_CURRENT },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val b = NotificationCompat.Builder(this, UpscalerApp.CHANNEL_PROGRESS)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(getString(R.string.app_name))
+            .setContentTitle(title ?: getString(R.string.app_name))
             .setContentText(text)
             .setContentIntent(open)
             .setOnlyAlertOnce(true)
@@ -146,21 +205,21 @@ class UpscaleService : Service() {
         return b.build()
     }
 
-    private fun updateNotification(st: UpscaleState) {
+    private fun updateNotification(st: UpscaleState, name: String, left: Int) {
+        val suffix = if (left > 0) "  (+$left)" else ""
         val n = when (st) {
-            is UpscaleState.Preparing -> buildNotification(st.message, 0, true)
-            is UpscaleState.Running -> {
-                val eta = formatEta(st.etaSeconds)
-                buildNotification("${(st.progress * 100).toInt()}%  •  ${st.outputRes}  •  ⏳ $eta", (st.progress * 100).toInt(), false)
-            }
-            is UpscaleState.Done -> buildNotification(getString(R.string.notif_done) + " • ${st.outputRes}", 100, false, done = true)
-            is UpscaleState.Failed -> buildNotification(getString(R.string.notif_failed) + ": ${st.error}", 0, false, done = true)
+            is UpscaleState.Preparing -> buildNotification(st.message, 0, true, title = name + suffix)
+            is UpscaleState.Running -> buildNotification(
+                "${(st.progress * 100).toInt()}%  •  ${st.outputRes}  •  ⏳ ${fmt(st.etaSeconds)}",
+                (st.progress * 100).toInt(), false, title = name + suffix)
+            is UpscaleState.Done -> buildNotification(getString(R.string.notif_done) + " • ${st.outputRes}", 100, false, done = left == 0, title = name)
+            is UpscaleState.Failed -> buildNotification(getString(R.string.notif_failed) + ": ${st.error}", 0, false, done = left == 0, title = name)
             else -> return
         }
         try { NotificationManagerCompat.from(this).notify(NOTIF_ID, n) } catch (_: SecurityException) {}
     }
 
-    private fun formatEta(s: Long): String = if (s >= 3600) "%d:%02d:%02d".format(s / 3600, (s % 3600) / 60, s % 60) else "%d:%02d".format(s / 60, s % 60)
+    private fun fmt(s: Long): String = if (s >= 3600) "%d:%02d:%02d".format(s / 3600, (s % 3600) / 60, s % 60) else "%d:%02d".format(s / 60, s % 60)
 
     private fun stopSelfSafely() {
         try { wakeLock?.let { if (it.isHeld) it.release() } } catch (_: Throwable) {}
@@ -170,8 +229,7 @@ class UpscaleService : Service() {
     }
 
     override fun onDestroy() {
-        jobHandle?.cancel()
-        scope.cancel()
+        currentJob?.cancel(); worker?.cancel(); scope.cancel()
         try { wakeLock?.let { if (it.isHeld) it.release() } } catch (_: Throwable) {}
         super.onDestroy()
     }

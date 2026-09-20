@@ -71,6 +71,11 @@ class UpscalePipeline(private val ctx: Context) {
             Log.i(TAG, "Input: $info")
 
             val profile = DeviceProfiler.profile(ctx)
+
+            // ---- Trim range ---------------------------------------------------------------
+            val startUs = job.startMs.coerceAtLeast(0) * 1000
+            val endUs = if (job.endMs > 0 && job.endMs * 1000 > startUs) job.endMs * 1000 else Long.MAX_VALUE
+            val effectiveDurMs = (minOf(endUs, info.durationMs * 1000) - startUs) / 1000
             val useAi = job.preset != QualityPreset.FAST
             val srcW = info.width
             val srcH = info.height
@@ -106,18 +111,19 @@ class UpscalePipeline(private val ctx: Context) {
             val outName = buildOutName(info, encW, encH)
             tmpOut = File(ctx.cacheDir, "out_${System.currentTimeMillis()}.mp4")
             encoder = VideoEncoder(ctx, tmpOut.absolutePath, encW, encH, info.fps, job.inputUri,
-                copyAudio = info.hasAudio, preferHevc = job.preferHevc, rotationHint = info.rotation)
+                copyAudio = info.hasAudio, preferHevc = job.preferHevc, rotationHint = info.rotation,
+                audioStartUs = startUs, audioEndUs = endUs)
 
             // ---- Renderer (owns EGL on its own thread) ------------------------------------
             val encSurface = encoder.inputSurface
-            decoder = FrameDecoder(ctx, job.inputUri)
+            decoder = FrameDecoder(ctx, job.inputUri, startUs, endUs)
             val dec: FrameDecoder = decoder
             val enc: VideoEncoder = encoder
             val eng: SuperResolutionEngine? = engine
 
             val analyzer = FrameAnalyzer()
             val stabilizer = if (job.antiFlicker && useAi) TemporalStabilizer(aiW, aiH) else null
-            val totalFrames = info.frameCountEstimate.coerceAtLeast(1)
+            val totalFrames = (effectiveDurMs / 1000f * info.fps).toLong().coerceAtLeast(1)
             val smartSkip = job.preset == QualityPreset.BALANCED
 
             // Frame pools (reuse memory)
@@ -146,6 +152,7 @@ class UpscalePipeline(private val ctx: Context) {
 
                 // Stage 2: AI
                 launch(Dispatchers.Default) {
+                    val thermal = ThermalGuard(ctx)
                     var prevLow: IntArray? = null
                     val prevLowBuf = IntArray(srcW * srcH)
                     var lastOut: IntArray? = null
@@ -154,6 +161,7 @@ class UpscalePipeline(private val ctx: Context) {
                         while (isActive) {
                             val f = decodedQ.receive() ?: break
                             val out = upscaledPool.receive()
+                            thermal.cooldownIfNeeded()
                             val a = analyzer.analyze(f.pixels, srcW, srcH)
                             if (a.isSceneCut) stabilizer?.reset()
 
@@ -223,6 +231,7 @@ class UpscalePipeline(private val ctx: Context) {
             enc.close(); encoder = null
             dec.close(); decoder = null
             eng?.close(); engine = null
+            stabilizer?.close()
 
             _state.value = UpscaleState.Preparing("Saving to gallery…")
             val outFile: File = tmpOut
@@ -231,7 +240,7 @@ class UpscalePipeline(private val ctx: Context) {
             outFile.delete()
             val el = (SystemClock.elapsedRealtime() - t0) / 1000
             Log.i(TAG, "Done in ${el}s, frames=$processed skipped=$skipped")
-            _state.value = UpscaleState.Done(uri, outName, el, processed, skipped, "${outW}×$outH", size)
+            _state.value = UpscaleState.Done(job.inputUri, uri, outName, el, processed, skipped, "${outW}×$outH", size)
         } catch (ce: kotlinx.coroutines.CancellationException) {
             _state.value = UpscaleState.Cancelled
             throw ce

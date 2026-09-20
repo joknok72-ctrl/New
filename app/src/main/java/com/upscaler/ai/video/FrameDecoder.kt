@@ -22,7 +22,7 @@ class DecodedFrame(val width: Int, val height: Int) {
  * The input is tiny (144p–480p), so the YUV→RGB step is negligible; the AI is the bottleneck.
  * Uses the flexible YUV420 format which every Android decoder must support.
  */
-class FrameDecoder(ctx: Context, uri: Uri) : AutoCloseable {
+class FrameDecoder(ctx: Context, uri: Uri, private val startUs: Long = 0, private val endUs: Long = Long.MAX_VALUE) : AutoCloseable {
     companion object { private const val TAG = "FrameDecoder" }
 
     private val extractor = MediaExtractor()
@@ -45,6 +45,7 @@ class FrameDecoder(ctx: Context, uri: Uri) : AutoCloseable {
         }
         require(track >= 0 && fmt != null) { "No video track" }
         extractor.selectTrack(track)
+        if (startUs > 0) extractor.seekTo(startUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
         format = fmt
         width = fmt.getInteger(MediaFormat.KEY_WIDTH)
         height = fmt.getInteger(MediaFormat.KEY_HEIGHT)
@@ -64,7 +65,7 @@ class FrameDecoder(ctx: Context, uri: Uri) : AutoCloseable {
                 if (inIdx >= 0) {
                     val buf = codec.getInputBuffer(inIdx)!!
                     val n = extractor.readSampleData(buf, 0)
-                    if (n < 0) {
+                    if (n < 0 || extractor.sampleTime > endUs) {
                         codec.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                         inputDone = true
                     } else {
@@ -77,12 +78,18 @@ class FrameDecoder(ctx: Context, uri: Uri) : AutoCloseable {
             when {
                 outIdx >= 0 -> {
                     val eos = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                    if (info.size > 0 && info.presentationTimeUs < startUs) {
+                        // frames before the trim start (decoded because we seeked to the previous keyframe)
+                        codec.releaseOutputBuffer(outIdx, false)
+                        if (eos) outputDone = true
+                        continue
+                    }
                     if (info.size > 0) {
                         val img = codec.getOutputImage(outIdx)
                         if (img != null) {
                             yuvToArgb(img, out)
                             img.close()
-                            out.ptsUs = info.presentationTimeUs
+                            out.ptsUs = info.presentationTimeUs - startUs
                             out.index = frameIndex++
                             codec.releaseOutputBuffer(outIdx, false)
                             if (eos) outputDone = true

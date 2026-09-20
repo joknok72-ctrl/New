@@ -14,6 +14,9 @@ data class UpscaleJob(
     val antiFlicker: Boolean,
     val preferHevc: Boolean,
     val useGpu: Boolean,          // NNAPI on/off
+    /** Optional trim range in ms. endMs <= 0 means "to the end". */
+    val startMs: Long = 0,
+    val endMs: Long = 0,
 )
 
 sealed class UpscaleState {
@@ -32,6 +35,7 @@ sealed class UpscaleState {
         val elapsedSeconds: Long,
     ) : UpscaleState()
     data class Done(
+        val inputUri: Uri,
         val outputUri: Uri,
         val outputPath: String,
         val elapsedSeconds: Long,
