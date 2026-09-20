@@ -32,7 +32,15 @@
 | 📦 **HEVC output** | Smaller files; falls back to H.264 automatically |
 | 🔋 **Foreground service + wake lock** | Lock the screen, processing continues; progress in notification |
 | 🌍 **Arabic + English UI** | Follows system language, RTL supported |
-| 📤 **Share-to-app** | Share any video from Gallery / WhatsApp straight into the upscaler |
+| 📤 **Share-to-app** | Share one or many videos from Gallery / WhatsApp straight into the upscaler |
+| 👁️ **Instant before/after preview** *(v1.1)* | Upscales one frame in ~2 s so you see the result before committing |
+| 📏 **Real device benchmark** *(v1.1)* | The preview also measures your phone → ETA is *measured*, not guessed |
+| ✂️ **Trim** *(v1.1)* | Process only a part of the video (range slider) |
+| 🧪 **Quick 10-second test** *(v1.1)* | Try your settings on a 10 s clip before the full run |
+| 📚 **Batch queue** *(v1.1)* | Select many videos → processed one after another in the background |
+| 🕓 **History** *(v1.1)* | All previous outputs with open / share |
+| 💾 **Settings persist** *(v1.1)* | Your last preset / model / target are remembered |
+| 🌡️ **Thermal guard** *(v1.1)* | Auto-pauses when Android reports the phone is overheating |
 
 ## 🔗 Links
 
@@ -88,11 +96,13 @@ pip install torch onnx onnxruntime && python tools/export_models.py
 
 ## 🗺️ Roadmap / ideas
 
-- [ ] Batch queue (multiple videos)
+- [x] Batch queue (multiple videos) — v1.1
+- [x] Before/after preview + device benchmark — v1.1
+- [x] Trim / quick test — v1.1
 - [ ] Optional cloud GPU mode for 10× faster processing (paid API)
 - [ ] Face-enhancement pass (GFPGAN) for talking-head videos
 - [ ] Frame interpolation (RIFE) 15 fps → 60 fps
-- [ ] Side-by-side before/after preview scrubber
+- [ ] Video comparison scrubber on the finished output
 
 ## 📜 License
 
