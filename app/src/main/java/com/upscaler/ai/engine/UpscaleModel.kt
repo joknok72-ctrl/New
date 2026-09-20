@@ -1,8 +1,8 @@
 package com.upscaler.ai.engine
 
 /**
- * Available AI models bundled in assets/models (ONNX files)
- * All are Real-ESRGAN "SRVGGNetCompact" x4 networks (BSD-3 license, xinntao).
+ * Available AI models. Small ones are bundled in assets/models (ONNX files);
+ * big ones are downloaded on demand from the GitHub Release into filesDir/models.
  */
 enum class UpscaleModel(
     val assetName: String,
@@ -10,13 +10,16 @@ enum class UpscaleModel(
     val displayNameEn: String,
     val descriptionAr: String,
     val descriptionEn: String,
-    /** Relative compute cost. anime model has 16 features → ~4x faster than general (64 features). */
+    /** Relative compute cost vs GENERAL (64-feature compact net). */
     val relativeCost: Float,
+    /** null = bundled in APK; otherwise download URL. */
+    val downloadUrl: String? = null,
+    val downloadSizeMb: Int = 0,
 ) {
     GENERAL(
         assetName = "realesr-general-x4v3.onnx",
-        displayNameAr = "عام (أفضل جودة)",
-        displayNameEn = "General (best quality)",
+        displayNameAr = "عام (سريع + جودة عالية)",
+        displayNameEn = "General (fast, high quality)",
         descriptionAr = "مناسب لفيديوهات حقيقية: أفلام، يوتيوب 144p، تسجيلات قديمة",
         descriptionEn = "Real footage: movies, 144p YouTube rips, old recordings",
         relativeCost = 1.0f,
@@ -36,7 +39,19 @@ enum class UpscaleModel(
         descriptionAr = "مخصص للرسوم المتحركة، سريع جداً وخطوط حادة",
         descriptionEn = "Animation only. Very fast, crisp lines",
         relativeCost = 0.25f,
+    ),
+    ULTRA_PLUS(
+        assetName = "realesrgan-x4plus.onnx",
+        displayNameAr = "Ultra+ (وجوه وتفاصيل — أبطأ ×8)",
+        displayNameEn = "Ultra+ (faces & fine detail — 8x slower)",
+        descriptionAr = "الشبكة الكاملة RRDBNet 16M. أفضل جودة ممكنة للوجوه والملابس والنصوص. يُحمَّل مرة واحدة (67 MB)",
+        descriptionEn = "Full RRDBNet 16M-param net. Best possible quality for faces, fabric, text. One-time 67 MB download",
+        relativeCost = 8.0f,
+        downloadUrl = "https://github.com/joknok72-ctrl/New/releases/latest/download/realesrgan-x4plus.onnx",
+        downloadSizeMb = 67,
     );
+
+    val isDownloadable get() = downloadUrl != null
 
     companion object {
         fun fromName(n: String?): UpscaleModel = entries.firstOrNull { it.name == n } ?: GENERAL
@@ -70,5 +85,16 @@ enum class QualityPreset(val labelAr: String, val labelEn: String) {
 
     companion object {
         fun fromName(n: String?): QualityPreset = entries.firstOrNull { it.name == n } ?: BALANCED
+    }
+}
+
+/** Automatic colour/contrast enhancement for washed-out / dark sources (runs on GPU). */
+enum class ColorMode(val labelAr: String, val labelEn: String) {
+    OFF("بدون", "Off"),
+    AUTO("تلقائي (تباين + تشبع)", "Auto (contrast + saturation)"),
+    VIVID("حيوي", "Vivid");
+
+    companion object {
+        fun fromName(n: String?): ColorMode = entries.firstOrNull { it.name == n } ?: OFF
     }
 }

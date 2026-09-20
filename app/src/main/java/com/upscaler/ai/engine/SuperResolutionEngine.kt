@@ -38,7 +38,7 @@ class SuperResolutionEngine(
         const val OVERLAP = 8 // px in input space; must be even
     }
 
-    val tile: Int = profile.tileSize
+    val tile: Int = if (model.relativeCost >= 4f) (profile.tileSize / 2).coerceAtLeast(64) else profile.tileSize
     private val outTile = tile * SCALE
     private val step = tile - 2 * OVERLAP
 
@@ -58,7 +58,7 @@ class SuperResolutionEngine(
         private set
 
     init {
-        val bytes = ctx.assets.open("models/${model.assetName}").use { it.readBytes() }
+        val bytes = ModelStore.loadBytes(ctx, model)
         session = createSession(bytes)
         inputName = session.inputNames.first()
         Log.i(TAG, "Loaded ${model.assetName} via $providerName, tile=$tile")
