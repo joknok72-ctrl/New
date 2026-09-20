@@ -50,9 +50,9 @@ for k, u in W.items():
 
 
 def build(kind, gpu):
-    if kind == "x4plus": net = RRDBNet(3, 3, 64, 23, 32, 4)
-    elif kind == "anime": net = SRVGGNetCompact(3, 3, 16, 16, 4, "prelu")
-    else: net = SRVGGNetCompact(3, 3, 64, 32, 4, "prelu")
+    if kind == "x4plus": net = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
+    elif kind == "anime": net = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=16, upscale=4, act_type="prelu")
+    else: net = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=32, upscale=4, act_type="prelu")
     return RealESRGANer(scale=4, model_path=f"weights/{kind}.pth", model=net, tile=0, half=True, gpu_id=gpu)
 
 # one full set of models per GPU → true dual-GPU parallelism
