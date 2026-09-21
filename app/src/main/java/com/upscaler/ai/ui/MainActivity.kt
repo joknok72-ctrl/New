@@ -35,6 +35,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Delete
@@ -206,17 +208,27 @@ fun MainScreen(vm: MainViewModel) {
                 SourcesCard(sources, onPick = pick, onRemove = vm::removeSource)
                 val first = sources.firstOrNull()
                 if (first?.info != null) {
-                    analysis?.let { AnalysisBanner(it) }
-                    PreviewCard(preview, onRun = vm::runPreview)
-                    if (sources.size == 1) TrimCard(first.info.durationMs, trim, onChange = vm::setTrim)
-                    SettingsCard(settings, vm)
+                    MaxModeCard(settings, vm.plan(first.info), onToggle = { v -> vm.update { it.copy(maxMode = v) } })
                     EstimateCard(vm.estimateSeconds(), vm.isMeasured, sources.size)
+                    var expert by remember { mutableStateOf(false) }
+                    Row(Modifier.fillMaxWidth().clickable { expert = !expert }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Tune, null, tint = TextSecondary, modifier = Modifier.size(16.dp)); Spacer(Modifier.width(6.dp))
+                        Text(S.expert, color = TextSecondary, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                        Icon(if (expert) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null, tint = TextSecondary)
+                    }
+                    if (expert) {
+                        analysis?.let { AnalysisBanner(it) }
+                        PreviewCard(preview, onRun = vm::runPreview)
+                        if (sources.size == 1) TrimCard(first.info.durationMs, trim, onChange = vm::setTrim)
+                        if (!settings.maxMode) SettingsCard(settings, vm)
+                        else Text(S.maxModeLocked, color = TextSecondary, fontSize = 11.sp)
+                    }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        OutlinedButton(onClick = vm::startQuickTest, Modifier.weight(1f).height(58.dp), shape = RoundedCornerShape(18.dp)) {
+                        if (!settings.maxMode) OutlinedButton(onClick = vm::startQuickTest, Modifier.weight(1f).height(58.dp), shape = RoundedCornerShape(18.dp)) {
                             Icon(Icons.Default.Science, null); Spacer(Modifier.width(6.dp)); Text(S.quickTest, fontSize = 13.sp, maxLines = 2, textAlign = TextAlign.Center)
                         }
                         Button(
-                            onClick = vm::startAll, modifier = Modifier.weight(1.4f).height(58.dp), shape = RoundedCornerShape(18.dp),
+                            onClick = vm::startAll, modifier = Modifier.weight(1.4f).height(if (settings.maxMode) 66.dp else 58.dp), shape = RoundedCornerShape(18.dp),
                             colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Bg)
                         ) {
                             Icon(Icons.Default.AutoAwesome, null); Spacer(Modifier.width(8.dp))
@@ -487,6 +499,27 @@ private fun SettingsCard(s: Settings, vm: MainViewModel) {
             ToggleRow(S.antiFlicker, s.antiFlicker) { v -> vm.update { it.copy(antiFlicker = v) } }
             ToggleRow(S.hevc, s.hevc) { v -> vm.update { it.copy(hevc = v) } }
             ToggleRow(S.gpu, s.gpu) { v -> vm.update { it.copy(gpu = v) } }
+        }
+    }
+}
+
+@Composable
+private fun MaxModeCard(s: Settings, plan: String, onToggle: (Boolean) -> Unit) {
+    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = if (s.maxMode) Accent.copy(.14f) else Surface2)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.AutoAwesome, null, tint = Accent, modifier = Modifier.size(22.dp)); Spacer(Modifier.width(10.dp))
+                Text(S.maxMode, color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp, modifier = Modifier.weight(1f))
+                Switch(s.maxMode, onToggle, Modifier.height(24.dp))
+            }
+            if (s.maxMode) {
+                Text(S.maxModeHint, color = TextSecondary, fontSize = 12.sp)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.HighQuality, null, tint = Green, modifier = Modifier.size(16.dp)); Spacer(Modifier.width(6.dp))
+                    Text("${S.willProduce}: $plan", color = Green, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
         }
     }
 }

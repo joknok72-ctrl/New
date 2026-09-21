@@ -98,6 +98,7 @@ object S {
     val cloudNote get() = t("السحابة مجانية (HuggingFace ZeroGPU / Kaggle). لتسريع أكبر شغّل نوتبوك Kaggle من الريبو.", "Cloud is free (HuggingFace ZeroGPU / Kaggle). For max speed run the Kaggle notebook from the repo.")
     val maxMode get() = t("أقصى دقة ممكنة — نفس الفيديو", "Maximum resolution — same video")
     val maxModeHint get() = t("الوضع التلقائي: اديني الفيديو واضغط ابدأ. الناتج هو نفس الفيديو بنفس الألوان والإضاءة بس بأعلى دقة يقدر يوصلها الموبايل (حتى 4K).", "Auto mode: pick a video and press Start. The result is the same video, same colours and brightness, at the highest resolution your phone can produce (up to 4K).")
+    val maxModeLocked get() = t("الوضع التلقائي شغّال — اقفله من فوق لو عاوز تتحكم يدوي", "Auto mode is on — switch it off above for manual control")
     val expert get() = t("إعدادات يدوية (للخبراء)", "Manual settings (expert)")
     val willProduce get() = t("هيتحوّل إلى", "Will be upscaled to")
     val natural get() = t("مطابقة الأصل (ضد البلاستيك)", "Faithful to source (anti-plastic)")

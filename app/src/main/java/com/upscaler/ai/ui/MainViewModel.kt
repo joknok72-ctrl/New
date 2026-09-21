@@ -107,34 +107,54 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val primary: SourceItem? get() = _sources.value.firstOrNull()
 
     /**
-     * MAX mode → the settings actually used for a job: same video, highest resolution the pipeline/encoder
-     * can produce, faithful colours (natural = 1), no colour grading, AI on every frame, 2-pass when 16x fits 4K,
-     * best available model (Ultra+ if downloaded, else content-recommended), cloud GPU helping when online.
+     * MAX mode → the settings actually used for a job. Goal: SAME video (natural = 1 → source colours,
+     * brightness and shading are kept exactly; only sub-pixel detail is added), at the highest resolution
+     * we can produce within a sane time budget (≈30 min):
+     *   • cloud GPU online  → cloud-only ×4 (T4×2 / A10G, minutes) then GPU-resized to the largest target
+     *   • else 2-pass AI (×16 → up to 4K) when the estimate fits the budget, otherwise 1-pass ×4
+     *   • best model: Ultra+ if downloaded (single-pass only), else the content-recommended one
+     *   • no colour grading, light sharpen, anti-flicker on
      */
     fun effective(info: VideoInfo?): Settings {
         val s = _settings.value
         if (!s.maxMode) return s
         val short = info?.let { minOf(it.displayWidth, it.displayHeight) } ?: 144
         val long = info?.let { maxOf(it.displayWidth, it.displayHeight) } ?: 256
-        val twoPassFits = long * 16 <= 4096
-        val preset = if (twoPassFits) QualityPreset.ULTRA else QualityPreset.HIGH
-        // biggest target we can reach: ×16 (2-pass) or ×4, capped at 4K
-        val reach = short * (if (twoPassFits) 16 else 4)
-        val target = TargetResolution.entries.filter { it != TargetResolution.AUTO && it.height <= minOf(reach, 2160) }
-            .maxByOrNull { it.height } ?: TargetResolution.AUTO
+        val durMs = info?.durationMs ?: 60_000L
         val ultraReady = _modelsAvailable.value[UpscaleModel.ULTRA_PLUS] == true
-        val model = when {
-            ultraReady && !twoPassFits -> UpscaleModel.ULTRA_PLUS          // heavy net only when single pass
-            else -> _analysis.value?.recommended ?: UpscaleModel.NATURAL
-        }
+        val recommended = _analysis.value?.recommended ?: UpscaleModel.NATURAL
         val cloudUp = _cloud.value?.ok == true
-        val compute = if (cloudUp && !twoPassFits) ComputeMode.HYBRID else ComputeMode.DEVICE
-        return s.copy(preset = preset, target = target, model = model, natural = 1.0f, color = ColorMode.OFF,
-            sharpen = 0.15f, antiFlicker = true, compute = compute, autoModel = true)
+        fun targetFor(reachShort: Int): TargetResolution =
+            TargetResolution.entries.filter { it != TargetResolution.AUTO && it.height <= 2160 }
+                .filter { it.height >= reachShort || it.height == 2160 }
+                .minByOrNull { it.height } ?: TargetResolution.P2160
+        val base = s.copy(natural = 1.0f, color = ColorMode.OFF, sharpen = 0.15f, antiFlicker = true, autoModel = true)
+
+        // 1) cloud GPU: fastest and strongest single pass
+        if (cloudUp && durMs <= 12 * 60_000L) {
+            return base.copy(compute = ComputeMode.CLOUD, preset = QualityPreset.HIGH,
+                model = if (ultraReady) UpscaleModel.ULTRA_PLUS else recommended, target = targetFor(short * 4))
+        }
+        // 2) on-device 2-pass (×16) if it fits 4K and the time budget
+        val twoPassFits = long * 16 <= 4096
+        if (twoPassFits && info != null) {
+            val ultra = base.copy(compute = ComputeMode.DEVICE, preset = QualityPreset.ULTRA, model = recommended, target = targetFor(short * 16))
+            if (estimateOne(info, durMs, ultra) <= 30 * 60.0) return ultra
+        }
+        // 3) on-device single pass ×4 with the best model that fits the budget
+        val heavy = base.copy(compute = ComputeMode.DEVICE, preset = QualityPreset.HIGH, model = UpscaleModel.ULTRA_PLUS, target = targetFor(short * 4))
+        if (ultraReady && info != null && estimateOne(info, durMs, heavy) <= 30 * 60.0) return heavy
+        return base.copy(compute = ComputeMode.DEVICE, preset = QualityPreset.HIGH, model = recommended, target = targetFor(short * 4))
     }
 
-    init { refreshCloud() }
-    fun refreshCloud() { viewModelScope.launch(Dispatchers.IO) { _cloud.value = runCatching { CloudEngine().health() }.getOrNull() ?: CloudEngine.Health(false, null, null, 0) } }
+    /** Human label of what MAX mode will produce for the first source (e.g. "1080p • 2-pass AI • cloud"). */
+    fun plan(info: VideoInfo?): String {
+        val e = effective(info)
+        val res = if (e.target == TargetResolution.AUTO) "×4" else e.target.label.substringBefore(' ')
+        val how = if (S.ar) e.preset.labelAr else e.preset.labelEn
+        val where = if (S.ar) e.compute.labelAr else e.compute.labelEn
+        return "$res • $how • $where"
+    }
 
     fun addSources(uris: List<Uri>) {
         if (uris.isEmpty()) return
