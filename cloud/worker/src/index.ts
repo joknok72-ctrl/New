@@ -85,6 +85,7 @@ export default {
       if (url.pathname === "/video" && req.method === "POST") return video(req, env, ctx);
       if (url.pathname.startsWith("/result/")) return result(url.pathname.slice(8), env);
       if (url.pathname === "/backends" && req.method === "POST") return setBackends(req, env);
+      if (url.pathname === "/backends/kick" && req.method === "POST") return kickBackends(req, env);
       return json({ error: "not found" }, 404);
     } catch (e: any) {
       return json({ error: e?.message ?? String(e) }, 500);
@@ -144,7 +145,17 @@ async function health(env: Env) {
   const list = await backends(env);
   const probes = await Promise.all(list.map(probe));
   const primary = probes.find((p) => p.up)?.host ?? null;
-  return json({ ok: probes.some((p) => p.up), primary, gpu: primary ? (primary.includes("hf.space") ? "HF ZeroGPU (A10G, shared)" : "Kaggle 2× T4 (dedicated)") : null, backends: probes, version: 2 });
+  const meta = await env.R2.get("_config/backends.meta.json").then((o) => o?.json<any>()).catch(() => null);
+  return json({ ok: probes.some((p) => p.up), primary, gpu: primary ? (primary.includes("hf.space") ? "HF ZeroGPU (A10G, shared)" : "Kaggle 2× T4 (dedicated)") : null, backends: probes, version: 2, kickBefore: meta?.kickBefore ?? 0 });
+}
+
+/** Admin: ask every Kaggle kernel whose session started before `now` to exit (frees GPU slots for a new push). */
+async function kickBackends(req: Request, env: Env) {
+  if (!env.ADMIN_KEY || req.headers.get("X-Admin-Key") !== env.ADMIN_KEY) return json({ error: "unauthorized" }, 401);
+  const cur = (await env.R2.get("_config/backends.meta.json").then((o) => o?.json<any>()).catch(() => null)) ?? {};
+  cur.kickBefore = Math.floor(Date.now() / 1000);
+  await env.R2.put("_config/backends.meta.json", JSON.stringify(cur));
+  return json({ ok: true, kickBefore: cur.kickBefore });
 }
 
 async function setBackends(req: Request, env: Env) {
@@ -160,7 +171,7 @@ async function setBackends(req: Request, env: Env) {
     return json({ ok: false, error: "stale session", current: cur }, 409);
   }
   await env.R2.put("_config/backends.json", body);
-  await env.R2.put("_config/backends.meta.json", JSON.stringify({ sessionStart: mine || Math.floor(Date.now() / 1000), updated: Date.now() }));
+  await env.R2.put("_config/backends.meta.json", JSON.stringify({ sessionStart: mine || Math.floor(Date.now() / 1000), updated: Date.now(), kickBefore: cur?.kickBefore ?? 0 }));
   prefixCache.clear(); modelsCache.clear();
   return json({ ok: true, backends: await backends(env) });
 }

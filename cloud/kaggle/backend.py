@@ -247,6 +247,8 @@ while time.time() < t_end and not STALE[0]:
     time.sleep(120)
     try:
         h = requests.get(WORKER_URL + "/health", timeout=15).json()
+        if int(h.get("kickBefore") or 0) > SESSION_START:
+            print("kicked by admin (new version incoming) → exiting", flush=True); STALE[0] = False; break
         hosts = [b["host"] for b in h.get("backends", [])]
         live = [x for x in hosts if "gradio.live" in x]
         if live and host not in live:
