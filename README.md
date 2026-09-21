@@ -56,6 +56,23 @@
 - **Latest APK**: https://github.com/joknok72-ctrl/New/releases/latest
 - **CI builds**: https://github.com/joknok72-ctrl/New/actions
 
+## 🎞️ Video quality: no more "plastic robot" look (v1.4)
+
+![before/after](docs/quality_comparison.png)
+
+*Top-left: v1.0 output — hard fake edges and a frozen frame. Bottom: v1.4 `Natural` model — real hair strands, soft sand/sea texture, correct motion. Top-right: the true 360p source for reference.*
+
+What changed and why (measured on a real 144p clip vs. ground truth):
+
+| Problem you saw | Root cause | Fix |
+|---|---|---|
+| Video "cuts"/stutters | Duplicate-frame skipper threshold 1.2 treated **all** slow-motion frames as duplicates → 239/240 frames frozen | Threshold 0.05 (only true encoder repeats). Motion now matches source (0.196 vs 0.197) |
+| "Robot / plastic" faces | Pure `general` model hallucinates hard edges & erases texture | New default **`Natural`** model = 50/50 weight-blend of general + denoise (official Real-ESRGAN `dni` trick) + source-guided blend in flat regions + light grain add-back |
+| Shimmer between frames | Each frame upscaled independently | Cloud: optical-flow motion-compensated blend of previous output. Device: stronger motion-adaptive stabilizer |
+| Tiny sources look fake at ×4 | Network asked to invent 16× pixels | `natural ≥ 0.75` on ≤240p: bicubic ×2 first, AI does only ×2 |
+
+PSNR vs ground truth: v1.0 **21.4 dB** → v1.4 **30.0 dB** (bicubic baseline 30.5, so we now add detail *without* drifting from reality).
+
 ## ☁️ Cloud GPU (free)
 
 ```

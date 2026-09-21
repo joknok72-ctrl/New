@@ -219,9 +219,19 @@ def unregister():
 register(); atexit.register(unregister)
 
 # ── 5) serve until Kaggle stops us (max session ~12h; stop at 11h40 to exit cleanly) ──
+# If a NEWER session has registered itself (host differs), we are stale → exit so only one session runs.
 t_end = time.time() + 11 * 3600 + 40 * 60
 while time.time() < t_end:
-    time.sleep(300)
-    try: requests.get(host + "/queue/status", timeout=10); register()
+    time.sleep(120)
+    try:
+        h = requests.get(WORKER_URL + "/health", timeout=15).json()
+        hosts = [b["host"] for b in h.get("backends", [])]
+        live = [x for x in hosts if "gradio.live" in x]
+        if live and host not in live:
+            print("newer session registered:", live, "→ exiting this stale session", flush=True)
+            break
+        if host not in hosts: register()
     except Exception as e: print("ping", e, flush=True)
-unregister()
+if host in [b["host"] for b in requests.get(WORKER_URL + "/health", timeout=15).json().get("backends", [])]:
+    unregister()
+os._exit(0)
