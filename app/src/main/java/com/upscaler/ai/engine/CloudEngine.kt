@@ -118,7 +118,10 @@ class CloudEngine(private val baseUrl: String = DEFAULT_URL) {
         }
         FileInputStream(file).use { it.copyTo(c.outputStream, 256 * 1024) }
         c.outputStream.close()
-        if (c.responseCode != 200) { onEvent(VideoEvent.Error("cloud ${c.responseCode}")); return@withContext null }
+        if (c.responseCode != 200) {
+            val body = runCatching { c.errorStream?.bufferedReader()?.readText()?.take(160) }.getOrNull()
+            onEvent(VideoEvent.Error("cloud HTTP ${c.responseCode}${body?.let { ": $it" } ?: ""}")); return@withContext null
+        }
         var resultUrl: String? = null
         c.inputStream.bufferedReader().useLines { lines ->
             for (line in lines) {
@@ -127,7 +130,12 @@ class CloudEngine(private val baseUrl: String = DEFAULT_URL) {
                 when (j.optString("stage")) {
                     "done" -> { resultUrl = j.getString("url"); onEvent(VideoEvent.Done(resultUrl!!)) }
                     "error" -> { onEvent(VideoEvent.Error(j.optString("error"))); return@withContext null }
-                    else -> onEvent(VideoEvent.Progress(j.optString("stage"), j.optString("log", null) ?: j.optString("eta", null)?.let { "ETA ${it}s" }))
+                    "retrying" -> onEvent(VideoEvent.Progress("switching backend", j.optString("error", null)?.take(60)))
+                    else -> {
+                        val prog = j.optDouble("progress", -1.0)
+                        val detail = j.optString("log", "").ifBlank { null } ?: (if (prog >= 0) "${(prog * 100).toInt()}%" else null)
+                        onEvent(VideoEvent.Progress(j.optString("stage"), detail))
+                    }
                 }
             }
         }

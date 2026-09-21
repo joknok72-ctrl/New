@@ -204,16 +204,22 @@ print("PUBLIC URL:", share_url, flush=True)
 
 # ── 4) register with the Worker ───────────────────────────────────────────────────
 host = (share_url or "").rstrip("/")
+SESSION_START = int(time.time())
+HDR = {"X-Admin-Key": ADMIN_KEY, "X-Session-Start": str(SESSION_START)}
+STALE = [False]
 
 
 def register():
     if not ADMIN_KEY or not host: print("⚠️ no ADMIN_KEY/share url — not registering", flush=True); return
-    r = requests.post(WORKER_URL + "/backends", data=f"{host}|0|1|3,{HF_FALLBACK}", headers={"X-Admin-Key": ADMIN_KEY}, timeout=30)
+    r = requests.post(WORKER_URL + "/backends", data=f"{host}|0|1|3,{HF_FALLBACK}", headers=HDR, timeout=30)
+    if r.status_code == 409:
+        print("⏹ a NEWER session is registered — this one is stale, shutting down", flush=True); STALE[0] = True; return
     print("✅ REGISTERED" if r.ok else "❌ register failed", r.status_code, r.text[:200], flush=True)
 
 
 def unregister():
-    try: requests.post(WORKER_URL + "/backends", data=HF_FALLBACK, headers={"X-Admin-Key": ADMIN_KEY}, timeout=15); print("unregistered", flush=True)
+    if STALE[0]: return
+    try: requests.post(WORKER_URL + "/backends?force=1", data=HF_FALLBACK, headers=HDR, timeout=15); print("unregistered", flush=True)
     except Exception as e: print(e)
 
 register(); atexit.register(unregister)
@@ -221,7 +227,7 @@ register(); atexit.register(unregister)
 # ── 5) serve until Kaggle stops us (max session ~12h; stop at 11h40 to exit cleanly) ──
 # If a NEWER session has registered itself (host differs), we are stale → exit so only one session runs.
 t_end = time.time() + 11 * 3600 + 40 * 60
-while time.time() < t_end:
+while time.time() < t_end and not STALE[0]:
     time.sleep(120)
     try:
         h = requests.get(WORKER_URL + "/health", timeout=15).json()

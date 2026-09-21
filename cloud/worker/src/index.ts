@@ -28,6 +28,32 @@ type Backend = { host: string; fnImage: number; fnVideo: number; kind: "gradio";
 /** Our Kaggle backend (args=3) also takes a 4th "natural" 0..1 arg on the video fn. */
 
 const prefixCache = new Map<string, string>();
+const modelsCache = new Map<string, string[]>();
+/** Which model names a backend accepts (from its Gradio dropdown). Empty = unknown (2-arg public spaces). */
+async function backendModels(b: Backend): Promise<string[]> {
+  const c = modelsCache.get(b.host);
+  if (c) return c;
+  let out: string[] = [];
+  try {
+    const r = await fetch(b.host + "/config", { signal: AbortSignal.timeout(8000) });
+    const j: any = r.ok ? await r.json() : {};
+    for (const comp of j?.components ?? []) {
+      if (comp?.type === "dropdown" && Array.isArray(comp?.props?.choices)) {
+        out = comp.props.choices.map((x: any) => (Array.isArray(x) ? String(x[1] ?? x[0]) : String(x)));
+        break;
+      }
+    }
+  } catch {}
+  modelsCache.set(b.host, out);
+  return out;
+}
+/** Map requested model to one the backend supports (natural→general fallback etc.). */
+async function resolveModel(b: Backend, want: string): Promise<string> {
+  const have = await backendModels(b);
+  if (!have.length || have.includes(want)) return want;
+  if (want === "natural" && have.includes("general")) return "general";
+  return have.includes("general") ? "general" : have[0];
+}
 /** Gradio 5 serves the API under /gradio_api; Gradio 4 at root. Detect once per host. */
 async function apiPrefix(b: Backend): Promise<string> {
   if (b.prefix !== undefined) return b.prefix;
@@ -123,8 +149,18 @@ async function health(env: Env) {
 
 async function setBackends(req: Request, env: Env) {
   if (!env.ADMIN_KEY || req.headers.get("X-Admin-Key") !== env.ADMIN_KEY) return json({ error: "unauthorized" }, 401);
-  const body = await req.text();
+  const body = (await req.text()).trim();
+  const url = new URL(req.url);
+  // A registration carries the session start time (X-Session-Start, epoch seconds). An OLDER session may not
+  // overwrite a NEWER one — this is what previously let a stale Kaggle kernel steal "primary" back.
+  const mine = parseInt(req.headers.get("X-Session-Start") ?? "0", 10) || 0;
+  const cur = await env.R2.get("_config/backends.meta.json").then((o) => o?.json<any>()).catch(() => null);
+  if (!url.searchParams.get("force") && cur?.sessionStart && mine && mine < cur.sessionStart && body.includes("gradio.live")) {
+    return json({ ok: false, error: "stale session", current: cur }, 409);
+  }
   await env.R2.put("_config/backends.json", body);
+  await env.R2.put("_config/backends.meta.json", JSON.stringify({ sessionStart: mine || Math.floor(Date.now() / 1000), updated: Date.now() }));
+  prefixCache.clear(); modelsCache.clear();
   return json({ ok: true, backends: await backends(env) });
 }
 
@@ -206,7 +242,7 @@ async function frame(req: Request, env: Env, ctx: ExecutionContext) {
     try {
       const path = await gradioUpload(b, new Blob([body], { type: mime }), `f.${ext}`);
       const args: any[] = [fileData(b, path, `f.${ext}`, mime, body.byteLength), scale];
-      if (b.args === 3) args.push(model);
+      if (b.args === 3) args.push(await resolveModel(b, model));
       const out = await gradioRun(b, b.fnImage, args, undefined, 180_000);
       const outUrl: string = out[0]?.url ?? `${b.host}${b.prefix ?? ""}/file=${out[0]?.path}`;
       const img = await fetch(outUrl, { signal: AbortSignal.timeout(60_000) });
@@ -243,30 +279,43 @@ async function video(req: Request, env: Env, ctx: ExecutionContext) {
       const cached = await env.R2.head(key);
       if (cached) { await send({ stage: "done", url: `/result/${key}`, cache: "HIT" }); return; }
       await send({ stage: "picking_backend" });
-      const b = await pickBackend(env);
-      await send({ stage: "uploading", backend: b.host });
-      const path = await gradioUpload(b, new Blob([body], { type: "video/mp4" }), "in.mp4");
-      await send({ stage: "queued" });
-      const fd = fileData(b, path, "in.mp4", "video/mp4", body.byteLength);
-      // Gradio 5 Video component wants { video: FileData, subtitles: null }; Gradio 4 wants FileData
-      const vin: any = (b.prefix ?? "") ? { video: fd, subtitles: null } : fd;
-      const vargs: any[] = [vin, scale];
-      if (b.args === 3) {
-        vargs.push(url.searchParams.get("model") || "general");
-        const nat = parseFloat(url.searchParams.get("natural") ?? "0.5");
-        vargs.push(isFinite(nat) ? Math.min(1, Math.max(0, nat)) : 0.5);
+      const candidates = await pickBackends(env);
+      if (!candidates.length) throw new Error("no GPU backend available");
+      const wantModel = url.searchParams.get("model") || "general";
+      let lastErr: any = null;
+      for (const b of candidates) {
+        try {
+          await send({ stage: "uploading", backend: b.host });
+          const path = await gradioUpload(b, new Blob([body], { type: "video/mp4" }), "in.mp4");
+          await send({ stage: "queued" });
+          const fd = fileData(b, path, "in.mp4", "video/mp4", body.byteLength);
+          const vin: any = (b.prefix ?? "") ? { video: fd, subtitles: null } : fd;
+          const vargs: any[] = [vin, scale];
+          if (b.args === 3) {
+            vargs.push(await resolveModel(b, wantModel));
+            const nat = parseFloat(url.searchParams.get("natural") ?? "0.5");
+            vargs.push(isFinite(nat) ? Math.min(1, Math.max(0, nat)) : 0.5);
+          }
+          const out = await gradioRun(b, b.fnVideo, vargs, (ev) => {
+            if (ev.msg === "estimation") send({ stage: "queued", rank: ev.rank, eta: ev.rank_eta });
+            else if (ev.msg === "process_starts") send({ stage: "processing", eta: ev.eta });
+            else if (ev.msg === "log") send({ stage: "processing", log: ev.log });
+            else if (ev.msg === "progress" && ev.progress_data?.[0]) send({ stage: "processing", log: ev.progress_data[0].desc ?? "", progress: ev.progress_data[0].progress ?? null });
+          }, 900_000);
+          const outUrl: string = out[0]?.video?.url ?? out[0]?.url ?? `${b.host}${b.prefix ?? ""}/file=${out[0]?.video?.path ?? out[0]?.path}`;
+          await send({ stage: "downloading" });
+          const r = await fetch(outUrl, { signal: AbortSignal.timeout(300_000) });
+          if (!r.ok || !r.body) throw new Error(`fetch result ${r.status}`);
+          await env.R2.put(key, r.body, { httpMetadata: { contentType: "video/mp4" } });
+          await send({ stage: "done", url: `/result/${key}`, cache: "MISS", backend: b.host });
+          lastErr = null;
+          break;
+        } catch (e: any) {
+          lastErr = e;
+          await send({ stage: "retrying", backend: b.host, error: e?.message ?? String(e) });
+        }
       }
-      const out = await gradioRun(b, b.fnVideo, vargs, (ev) => {
-        if (ev.msg === "estimation") send({ stage: "queued", rank: ev.rank, eta: ev.rank_eta });
-        else if (ev.msg === "process_starts") send({ stage: "processing", eta: ev.eta });
-        else if (ev.msg === "log") send({ stage: "processing", log: ev.log });
-      }, 900_000);
-      const outUrl: string = out[0]?.video?.url ?? out[0]?.url ?? `${b.host}${b.prefix ?? ""}/file=${out[0]?.video?.path ?? out[0]?.path}`;
-      await send({ stage: "downloading" });
-      const r = await fetch(outUrl, { signal: AbortSignal.timeout(300_000) });
-      if (!r.ok || !r.body) throw new Error(`fetch result ${r.status}`);
-      await env.R2.put(key, r.body, { httpMetadata: { contentType: "video/mp4" } });
-      await send({ stage: "done", url: `/result/${key}`, cache: "MISS", backend: b.host });
+      if (lastErr) throw lastErr;
     } catch (e: any) {
       await send({ stage: "error", error: e?.message ?? String(e) });
     } finally {

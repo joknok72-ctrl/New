@@ -87,9 +87,15 @@ class UpscalePipeline(private val ctx: Context) {
             Log.i(TAG, "Input: $info")
 
             if (job.compute == ComputeMode.CLOUD && job.preset != QualityPreset.FAST) {
-                runCloudOnly(job, info, t0)
-                return@withContext
+                val ok = runCloudOnly(job, info, t0)
+                if (ok) return@withContext
+                // Cloud-only failed (GPU busy / tunnel restarting / upload too large) → don't give up:
+                // continue below in HYBRID mode so the user still gets a result.
+                val why = (_state.value as? UpscaleState.Failed)?.error ?: "cloud unavailable"
+                Log.w(TAG, "cloud-only failed ($why) → falling back to hybrid")
+                _state.value = UpscaleState.Preparing("Cloud failed: $why — continuing on device + cloud (Hybrid)…")
             }
+            val effectiveJob = if (job.compute == ComputeMode.CLOUD) job.copy(compute = ComputeMode.HYBRID) else job
 
             val profile = DeviceProfiler.profile(ctx)
 
@@ -153,7 +159,7 @@ class UpscalePipeline(private val ctx: Context) {
             val totalFrames = (effectiveDurMs / 1000f * info.fps).toLong().coerceAtLeast(1)
             val smartSkip = job.preset == QualityPreset.BALANCED
 
-            val cloud: CloudEngine? = if (job.compute == ComputeMode.HYBRID && useAi && passes == 1) CloudEngine() else null
+            val cloud: CloudEngine? = if (effectiveJob.compute == ComputeMode.HYBRID && useAi && passes == 1) CloudEngine() else null
             val cloudFrames = java.util.concurrent.atomic.AtomicLong(0)
             val cloudOk = cloud?.let { c -> runCatching { c.health().ok }.getOrDefault(false) } ?: false
             if (cloud != null) Log.i(TAG, "hybrid: cloud ${if (cloudOk) "available" else "unavailable → device only"}")
@@ -346,11 +352,11 @@ class UpscalePipeline(private val ctx: Context) {
     }
 
     /** CLOUD mode: (trim →) upload the clip to the free GPU via the Worker, download, save. */
-    private suspend fun runCloudOnly(job: UpscaleJob, info: VideoInfo, t0: Long) {
+    private suspend fun runCloudOnly(job: UpscaleJob, info: VideoInfo, t0: Long): Boolean {
         val cloud = CloudEngine()
         _state.value = UpscaleState.Preparing("Checking cloud GPU…")
         val h = cloud.health()
-        if (!h.ok) { _state.value = UpscaleState.Failed("Cloud GPU unavailable — switch to Hybrid or Device"); return }
+        if (!h.ok) { _state.value = UpscaleState.Failed("Cloud GPU unavailable"); return false }
         _state.value = UpscaleState.Preparing("Preparing upload (${h.gpu ?: "GPU"})…")
         val tmpIn = File(ctx.cacheDir, "cloud_in_${System.currentTimeMillis()}.mp4")
         var out: File? = null
@@ -358,24 +364,36 @@ class UpscalePipeline(private val ctx: Context) {
             val startUs = job.startMs.coerceAtLeast(0) * 1000
             val endUs = if (job.endMs > 0 && job.endMs * 1000 > startUs) job.endMs * 1000 else Long.MAX_VALUE
             remuxRange(job.inputUri, tmpIn, startUs, endUs)
-            if (tmpIn.length() > 60_000_000L) { _state.value = UpscaleState.Failed("Clip too large for cloud (max 60 MB). Trim it or use Hybrid."); return }
+            if (tmpIn.length() > 60_000_000L) { _state.value = UpscaleState.Failed("clip > 60 MB"); return false }
             // choose 2x or 4x based on target
             val need = if (job.target == TargetResolution.AUTO) 4f else job.target.height.toFloat() / minOf(info.displayWidth, info.displayHeight)
             val scale = if (need <= 2.2f) 2 else 4
-            out = cloud.video(tmpIn, scale, job.model, job.natural) { ev ->
-                when (ev) {
-                    is CloudEngine.VideoEvent.Progress -> _state.value = UpscaleState.Preparing("Cloud GPU: ${ev.stage}${ev.detail?.let { " • $it" } ?: ""}")
-                    is CloudEngine.VideoEvent.Done -> _state.value = UpscaleState.Preparing("Downloading result…")
-                    is CloudEngine.VideoEvent.Error -> Log.w(TAG, "cloud: ${ev.message}")
+            var lastErr = "unknown"
+            for (attempt in 1..2) {
+                out = cloud.video(tmpIn, scale, job.model, job.natural) { ev ->
+                    when (ev) {
+                        is CloudEngine.VideoEvent.Progress -> _state.value = UpscaleState.Preparing("Cloud GPU (${h.gpu ?: "GPU"}): ${ev.stage}${ev.detail?.let { " • $it" } ?: ""}")
+                        is CloudEngine.VideoEvent.Done -> _state.value = UpscaleState.Preparing("Downloading result…")
+                        is CloudEngine.VideoEvent.Error -> { lastErr = ev.message; Log.w(TAG, "cloud: ${ev.message}") }
+                    }
                 }
+                if (out != null) break
+                if (attempt == 1) { _state.value = UpscaleState.Preparing("Cloud retry… ($lastErr)"); kotlinx.coroutines.delay(3000) }
             }
-            val f = out ?: run { _state.value = UpscaleState.Failed("Cloud processing failed — try Hybrid mode"); return }
+            val f = out ?: run { _state.value = UpscaleState.Failed(lastErr.take(120)); return false }
             _state.value = UpscaleState.Preparing("Saving to gallery…")
             val outW = info.displayWidth * scale; val outH = info.displayHeight * scale
             val name = buildOutName(info, outW, outH).replace("_AI_", "_CLOUD_")
             val uri = saveToGallery(f, name)
             val el = (SystemClock.elapsedRealtime() - t0) / 1000
             _state.value = UpscaleState.Done(job.inputUri, uri, name, el, info.frameCountEstimate, 0, "${outW}×$outH", f.length())
+            return true
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
+            Log.w(TAG, "cloud-only error", t)
+            _state.value = UpscaleState.Failed(t.message ?: t.javaClass.simpleName)
+            return false
         } finally {
             tmpIn.delete(); out?.delete()
         }
