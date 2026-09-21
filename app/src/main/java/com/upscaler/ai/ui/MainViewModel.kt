@@ -106,6 +106,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     val primary: SourceItem? get() = _sources.value.firstOrNull()
 
+    init { refreshCloud() }
+    fun refreshCloud() { viewModelScope.launch(Dispatchers.IO) { _cloud.value = runCatching { CloudEngine().health() }.getOrNull() ?: CloudEngine.Health(false, null, null, 0) } }
+
     /**
      * MAX mode → the settings actually used for a job. Goal: SAME video (natural = 1 → source colours,
      * brightness and shading are kept exactly; only sub-pixel detail is added), at the highest resolution

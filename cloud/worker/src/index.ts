@@ -155,7 +155,8 @@ async function setBackends(req: Request, env: Env) {
   // overwrite a NEWER one — this is what previously let a stale Kaggle kernel steal "primary" back.
   const mine = parseInt(req.headers.get("X-Session-Start") ?? "0", 10) || 0;
   const cur = await env.R2.get("_config/backends.meta.json").then((o) => o?.json<any>()).catch(() => null);
-  if (!url.searchParams.get("force") && cur?.sessionStart && mine && mine < cur.sessionStart && body.includes("gradio.live")) {
+  // Legacy kernels (no X-Session-Start) count as session 0 → they can never overwrite a registered session.
+  if (!url.searchParams.get("force") && cur?.sessionStart && mine < cur.sessionStart && body.includes("gradio.live")) {
     return json({ ok: false, error: "stale session", current: cur }, 409);
   }
   await env.R2.put("_config/backends.json", body);
