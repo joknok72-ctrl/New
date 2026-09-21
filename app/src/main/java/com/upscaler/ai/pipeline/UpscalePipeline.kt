@@ -237,7 +237,7 @@ class UpscalePipeline(private val ctx: Context) {
                                         eng.upscale(f.pixels, srcW, srcH, out)
                                     }
                                 }
-                                if (passes == 1) natural?.apply(out, f.pixels, job.natural)
+                                natural?.apply(out, f.pixels, job.natural)   // faithful pass (also after 2-pass ×16)
                                 if (stabilizer != null && passes == 1 && cloud == null) {
                                     stabilizer.apply(out, prevLow, f.pixels, srcW, srcH)
                                 }

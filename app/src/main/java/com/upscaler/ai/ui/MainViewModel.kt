@@ -40,19 +40,23 @@ data class Settings(
     val color: ColorMode = ColorMode.OFF,
     val autoModel: Boolean = true,
     val compute: ComputeMode = ComputeMode.DEVICE,
-    val natural: Float = 0.5f,
+    val natural: Float = 1.0f,
+    /** One-button mode: ignore manual choices, always produce the same video at the maximum possible resolution. */
+    val maxMode: Boolean = true,
 ) {
     fun toJson() = JSONObject().apply {
         put("model", model.name); put("preset", preset.name); put("target", target.name)
         put("sharpen", sharpen.toDouble()); put("antiFlicker", antiFlicker); put("hevc", hevc); put("gpu", gpu)
         put("color", color.name); put("autoModel", autoModel); put("compute", compute.name); put("natural", natural.toDouble())
+        put("maxMode", maxMode)
     }
     companion object {
         fun fromJson(o: JSONObject) = Settings(
             UpscaleModel.fromName(o.optString("model")), QualityPreset.fromName(o.optString("preset")),
             TargetResolution.fromName(o.optString("target")), o.optDouble("sharpen", 0.3).toFloat(),
             o.optBoolean("antiFlicker", true), o.optBoolean("hevc", true), o.optBoolean("gpu", true),
-            ColorMode.fromName(o.optString("color")), o.optBoolean("autoModel", true), ComputeMode.fromName(o.optString("compute")), o.optDouble("natural", 0.5).toFloat())
+            ColorMode.fromName(o.optString("color")), o.optBoolean("autoModel", true), ComputeMode.fromName(o.optString("compute")), o.optDouble("natural", 1.0).toFloat(),
+            o.optBoolean("maxMode", true))
     }
 }
 
@@ -101,6 +105,33 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var previewJob: Job? = null
 
     val primary: SourceItem? get() = _sources.value.firstOrNull()
+
+    /**
+     * MAX mode → the settings actually used for a job: same video, highest resolution the pipeline/encoder
+     * can produce, faithful colours (natural = 1), no colour grading, AI on every frame, 2-pass when 16x fits 4K,
+     * best available model (Ultra+ if downloaded, else content-recommended), cloud GPU helping when online.
+     */
+    fun effective(info: VideoInfo?): Settings {
+        val s = _settings.value
+        if (!s.maxMode) return s
+        val short = info?.let { minOf(it.displayWidth, it.displayHeight) } ?: 144
+        val long = info?.let { maxOf(it.displayWidth, it.displayHeight) } ?: 256
+        val twoPassFits = long * 16 <= 4096
+        val preset = if (twoPassFits) QualityPreset.ULTRA else QualityPreset.HIGH
+        // biggest target we can reach: ×16 (2-pass) or ×4, capped at 4K
+        val reach = short * (if (twoPassFits) 16 else 4)
+        val target = TargetResolution.entries.filter { it != TargetResolution.AUTO && it.height <= minOf(reach, 2160) }
+            .maxByOrNull { it.height } ?: TargetResolution.AUTO
+        val ultraReady = _modelsAvailable.value[UpscaleModel.ULTRA_PLUS] == true
+        val model = when {
+            ultraReady && !twoPassFits -> UpscaleModel.ULTRA_PLUS          // heavy net only when single pass
+            else -> _analysis.value?.recommended ?: UpscaleModel.NATURAL
+        }
+        val cloudUp = _cloud.value?.ok == true
+        val compute = if (cloudUp && !twoPassFits) ComputeMode.HYBRID else ComputeMode.DEVICE
+        return s.copy(preset = preset, target = target, model = model, natural = 1.0f, color = ColorMode.OFF,
+            sharpen = 0.15f, antiFlicker = true, compute = compute, autoModel = true)
+    }
 
     init { refreshCloud() }
     fun refreshCloud() { viewModelScope.launch(Dispatchers.IO) { _cloud.value = runCatching { CloudEngine().health() }.getOrNull() ?: CloudEngine.Health(false, null, null, 0) } }
@@ -197,7 +228,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun runPreview() {
         val src = primary ?: return
         val info = src.info ?: return
-        val s = _settings.value
+        val s = effective(info)
         previewJob?.cancel()
         _preview.value = PreviewState(loading = true)
         previewJob = viewModelScope.launch(Dispatchers.Default) {
@@ -215,9 +246,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun estimateSeconds(): Long? {
         val items = _sources.value.mapNotNull { it.info }
         if (items.isEmpty()) return null
-        val s = _settings.value
         var total = 0.0
         items.forEachIndexed { idx, i ->
+            val s = effective(i)
             var durMs = i.durationMs
             if (idx == 0 && _trim.value.second > _trim.value.first) durMs = _trim.value.second - _trim.value.first
             total += estimateOne(i, durMs, s)
@@ -252,12 +283,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    val isMeasured: Boolean get() = PreviewEngine.cachedMsPerTile(_settings.value.model, _settings.value.gpu) != null
+    val isMeasured: Boolean get() { val s = effective(primary?.info); return PreviewEngine.cachedMsPerTile(s.model, s.gpu) != null }
 
     /** Enqueue all selected sources. */
     fun startAll() {
-        val s = _settings.value
         _sources.value.forEachIndexed { idx, src ->
+            val s = effective(src.info)
             val (a, b) = if (idx == 0) _trim.value else 0L to 0L
             UpscaleService.enqueue(ctx, UpscaleJob(src.uri, s.model, s.preset, s.target, s.sharpen, s.antiFlicker, s.hevc, s.gpu, a, b, s.color, s.compute, s.natural),
                 src.info?.displayName ?: "video")
@@ -267,7 +298,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Quick 10-second test of the first source with current settings. */
     fun startQuickTest() {
         val src = primary ?: return
-        val s = _settings.value
+        val s = effective(src.info)
         val start = _trim.value.first
         val info = src.info
         val end = minOf(start + 10_000, info?.durationMs ?: (start + 10_000))
