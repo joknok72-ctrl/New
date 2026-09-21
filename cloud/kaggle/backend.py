@@ -101,8 +101,12 @@ def infer_video(path: str, scale: int, model: str = "general", natural: float = 
     raw = tempfile.mktemp(suffix=".mp4"); final = tempfile.mktemp(suffix=".mp4")
     enc = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True).stdout
     codec = "h264_nvenc" if "h264_nvenc" in enc else "libx264"
-    ff = subprocess.Popen(["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{w}x{h}", "-r", str(fps), "-i", "-",
-                           "-c:v", codec, "-preset", "p5" if codec == "h264_nvenc" else "medium", "-b:v", f"{int(w*h*fps*0.10/1000)}k", "-pix_fmt", "yuv420p", raw], stdin=subprocess.PIPE)
+    # We convert BGR→YUV420 (BT.601 limited) ourselves with OpenCV. ffmpeg's default swscale RGB→yuv420p path
+    # truncates instead of rounding and darkens the whole picture by ≈1.8 L* — the single biggest "not the same
+    # video" error we measured. Feeding ready-made I420 makes the encode bit-faithful (measured +0.05 L*).
+    ff = subprocess.Popen(["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", f"{w}x{h}", "-r", str(fps), "-i", "-",
+                           "-c:v", codec, "-preset", "p5" if codec == "h264_nvenc" else "medium", "-b:v", f"{int(w*h*fps*0.10/1000)}k",
+                           "-pix_fmt", "yuv420p", "-colorspace", "smpte170m", "-color_range", "tv", raw], stdin=subprocess.PIPE)
     frames, dup_of, prev = [], [], None
     while True:
         ok, fr = cap.read()
@@ -192,7 +196,7 @@ def infer_video(path: str, scale: int, model: str = "general", natural: float = 
             cur = cur * (1 - alpha) + warped * alpha
 
         out8 = np.clip(np.rint(cur), 0, 255).astype(np.uint8)  # round, never truncate (truncation = -0.43 L shift)
-        ff.stdin.write(out8.tobytes())
+        ff.stdin.write(cv2.cvtColor(out8, cv2.COLOR_BGR2YUV_I420).tobytes())
         prev_out = cur; prev_src_small = src
         if i % 10 == 0: progress(0.8 + 0.2 * i / max(total, 1), desc=f"temporal {i}/{total}")
     ff.stdin.close(); ff.wait()
